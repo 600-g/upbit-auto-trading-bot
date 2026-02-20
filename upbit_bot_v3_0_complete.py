@@ -254,6 +254,7 @@ class TradingBotV3:
                 cfg = json.load(f)
             self._tg_token = cfg.get("telegram_bot_token", "")
             self._tg_chat_id = cfg.get("telegram_chat_id", "")
+            self._anthropic_key = cfg.get("anthropic_api_key", "")
 
             if self._tg_token and not self._tg_chat_id:
                 # chat_id가 비어있으면 getUpdates로 자동 감지 시도
@@ -346,11 +347,103 @@ class TradingBotV3:
                         msg = update.get("message", {})
                         text = msg.get("text", "").strip()
                         chat_id = str(msg.get("chat", {}).get("id", ""))
-                        if chat_id == self._tg_chat_id and text.startswith("/"):
-                            self._handle_telegram_command(text)
+                        if chat_id == self._tg_chat_id and text:
+                            if text.startswith("/"):
+                                self._handle_telegram_command(text)
+                            else:
+                                self._handle_chat_message(text)
             except Exception as e:
                 print(f"⚠️ 텔레그램 폴링 오류: {e}")
             time.sleep(5)
+
+    def _handle_chat_message(self, text):
+        """자연어 메시지를 Claude API로 처리"""
+        if not getattr(self, '_anthropic_key', ''):
+            self._tg_send("⚠️ Claude API 키가 설정되지 않았습니다.\nconfig.json에 anthropic_api_key를 추가하세요.")
+            return
+
+        try:
+            # 현재 봇 상태 수집
+            bot_state = self._get_bot_state_summary()
+
+            response = req_lib.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": self._anthropic_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 1024,
+                    "system": f"""너는 업비트 자동거래봇의 AI 어시스턴트야. 사용자가 텔레그램으로 질문하면 현재 봇 상태를 기반으로 간결하게 답해.
+
+현재 봇 상태:
+{bot_state}
+
+규칙:
+- 한국어로 답변, 짧고 핵심만
+- 설정 변경 요청이면 구체적인 /명령어를 안내해
+- 매매 판단의 이유를 설명할 때 모멘텀, 시장 상태 등을 근거로 답해
+- 절대 거짓 정보를 만들어내지 마""",
+                    "messages": [{"role": "user", "content": text}]
+                },
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                reply = data["content"][0]["text"]
+                self._tg_send(reply)
+            else:
+                self._tg_send(f"⚠️ AI 응답 오류 ({response.status_code})")
+                print(f"⚠️ Claude API 오류: {response.status_code} {response.text[:200]}")
+
+        except Exception as e:
+            print(f"⚠️ 채팅 처리 오류: {e}")
+            self._tg_send(f"⚠️ 처리 중 오류 발생: {e}")
+
+    def _get_bot_state_summary(self):
+        """현재 봇 상태를 텍스트로 요약"""
+        lines = []
+        lines.append(f"모드: {self.mode.upper()}")
+        lines.append(f"잔고: {self.current_balance:,.0f}원")
+        lines.append(f"매매 상태: {'일시중지' if getattr(self, '_tg_paused', False) else '가동 중'}")
+        lines.append(f"최대 포지션: {self.MAX_POSITIONS}개")
+
+        # 포지션 현황
+        if self.positions:
+            lines.append(f"\n보유 포지션 ({len(self.positions)}종목):")
+            for coin, batches in self.positions.items():
+                price = self.get_price(coin)
+                if price:
+                    coin_cost = sum(p['amount'] for p in batches.values())
+                    coin_qty = sum(p['quantity'] for p in batches.values())
+                    coin_pnl = coin_qty * price - coin_cost
+                    coin_rate = (coin_pnl / coin_cost * 100) if coin_cost > 0 else 0
+                    avg_buy = coin_cost / coin_qty if coin_qty > 0 else 0
+                    hours = max(self._hours_held(p) for p in batches.values())
+                    momentum = self.calculate_momentum(coin)
+                    lines.append(f"  {coin}: 수익률 {coin_rate:+.2f}% | 매수가 {avg_buy:,.0f}원 → 현재가 {price:,.0f}원 | 모멘텀 {momentum}점 | {hours:.1f}시간 보유 | {len(batches)}배치")
+        else:
+            lines.append("\n보유 포지션: 없음")
+
+        # 최근 거래
+        if self.trades:
+            recent = self.trades[-5:]
+            lines.append(f"\n최근 거래 ({len(self.trades)}건 중 최근 {len(recent)}건):")
+            for t in recent:
+                lines.append(f"  {t['coin']}: {t.get('profit_rate', 0):+.2f}% ({t.get('timestamp', '')[:16]})")
+
+        # 쿨다운 상태
+        if self._sell_cooldown:
+            lines.append(f"\n쿨다운 중: {', '.join(self._sell_cooldown.keys())}")
+
+        # 시장 상태
+        if hasattr(self, 'last_market_state'):
+            lines.append(f"\n시장 상태: {self.last_market_state}")
+
+        return "\n".join(lines)
 
     def _handle_telegram_command(self, text):
         """텔레그램 명령어 처리"""
