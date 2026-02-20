@@ -129,6 +129,7 @@ class TradingBotV3:
             self.upbit = None
 
         self._pending_2nd_buy = {}  # 2차 분할매수 대기열
+        self._sell_cooldown = {}  # 매도 후 재매수 쿨다운 {coin: timestamp}
 
         # 텔레그램 설정 로드
         self._load_telegram_config()
@@ -1438,6 +1439,24 @@ class TradingBotV3:
             if coin in self.positions:
                 continue
 
+            # 매도 후 재매수 보호 (10분 쿨다운 + 모멘텀 85점 이상 요구)
+            if coin in self._sell_cooldown:
+                elapsed = time.time() - self._sell_cooldown[coin]
+                if elapsed < 600:  # 10분 미경과
+                    remaining = int((600 - elapsed) / 60)
+                    print(f"⏳ {coin} 매도 후 쿨다운 중 (잔여 {remaining}분) → 패스")
+                    continue
+                elif elapsed < 3600:  # 10분~1시간: 모멘텀 85점 이상만 허용
+                    coin_momentum = self.calculate_momentum(coin)
+                    if coin_momentum < 85:
+                        print(f"⏳ {coin} 최근 매도 코인 → 모멘텀 {coin_momentum}점 < 85점 기준 미달 → 패스")
+                        continue
+                    else:
+                        print(f"🔥 {coin} 모멘텀 {coin_momentum}점 → 회복 확인, 재매수 허용")
+                        del self._sell_cooldown[coin]
+                else:  # 1시간 경과 → 쿨다운 해제
+                    del self._sell_cooldown[coin]
+
             # 투자유의/거래종료 예정 종목 절대 금지
             if hasattr(self, '_warning_coins') and coin in self._warning_coins:
                 print(f"🚫 {coin} 투자유의/거래종료 예정 → 절대 매수 금지")
@@ -1582,6 +1601,7 @@ class TradingBotV3:
                 print(f"🚨 {coin} 3분 10%+ 급변동 → 전체 긴급 손절!")
                 for batch_id in list(self.positions[coin].keys()):
                     self.place_sell_order(coin, batch_id)
+                self._sell_cooldown[coin] = time.time()
                 continue
 
             for batch_id in list(self.positions[coin].keys()):
@@ -1591,10 +1611,11 @@ class TradingBotV3:
                 momentum = self.calculate_momentum(coin)
                 uptrend = self._is_uptrend(coin)
 
-                # === 1. 모멘텀 급락 → 즉시 매도 (이익 있으면) ===
+                # === 1. 모멘텀 급락 → 즉시 매도 (급락 방어) ===
                 if momentum < 30 and profit_rate > 0:
                     print(f"⚡ {coin} {batch_id} 모멘텀 급락({momentum}점) → 즉시 매도 ({profit_rate*100:+.2f}%)")
                     self.place_sell_order(coin, batch_id)
+                    self._sell_cooldown[coin] = time.time()
                     continue
 
                 # === 2. 익절 (모멘텀 기반) ===
@@ -1626,6 +1647,7 @@ class TradingBotV3:
                 if profit_rate <= stop_loss:
                     print(f"🔻 {coin} {batch_id} 손절 ({profit_rate*100:+.2f}%, 기준 {stop_loss*100}%, {hours:.1f}시간 보유)")
                     self.place_sell_order(coin, batch_id)
+                    self._sell_cooldown[coin] = time.time()
                     continue
 
                 # === 4. 횡보 감지 → 교체 (2시간 이상 보유 & 수익 ±1% 이내) ===
