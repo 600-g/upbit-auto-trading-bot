@@ -1,0 +1,22 @@
+# API 키 (민감정보)
+config.json
+
+# 가상환경
+venv/
+
+# 로그 파일
+*.log
+bot.pid
+
+# 거래 로그
+trading_log_*.json
+
+# 데이터베이스
+*.db
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
