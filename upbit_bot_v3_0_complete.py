@@ -22,6 +22,8 @@ import sqlite3
 import re
 import socket
 import threading
+import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import numpy as np
 import feedparser
@@ -78,6 +80,11 @@ class TradingBotV3:
                     self._warning_coins.add(coin)
                     continue  # 유의 종목은 아예 목록에서 제외
 
+                # 스테이블코인 제외 (이익 불가, 스캔 낭비)
+                _STABLECOINS = {"USDT", "USDC", "BUSD", "DAI", "TUSD", "USDP", "USD1", "FDUSD"}
+                if coin in _STABLECOINS:
+                    continue
+
                 coins.append(coin)
 
             if self._warning_coins:
@@ -100,7 +107,7 @@ class TradingBotV3:
         self.coins = self._load_all_krw_coins()
         print(f"마켓 스캔: KRW 마켓 {len(self.coins)}개 코인 감지 (유의종목 {len(self._warning_coins)}개 제외)")
 
-        self.initial_balance = 500000
+        self.initial_balance = 1000000
         self.current_balance = self.initial_balance
         self.positions = {}  # {coin: {batch_1: {...}, batch_2: {...}}}
         self.trades = []
@@ -347,7 +354,7 @@ class TradingBotV3:
                         msg = update.get("message", {})
                         text = msg.get("text", "").strip()
                         chat_id = str(msg.get("chat", {}).get("id", ""))
-                        if chat_id == self._tg_chat_id and text:
+                        if chat_id == str(self._tg_chat_id) and text:
                             if text.startswith("/"):
                                 self._handle_telegram_command(text)
                             else:
@@ -357,26 +364,11 @@ class TradingBotV3:
             time.sleep(5)
 
     def _handle_chat_message(self, text):
-        """자연어 메시지를 Claude API로 처리"""
-        if not getattr(self, '_anthropic_key', ''):
-            self._tg_send("⚠️ Claude API 키가 설정되지 않았습니다.\nconfig.json에 anthropic_api_key를 추가하세요.")
-            return
-
+        """자연어 메시지를 Claude CLI(Max 요금제)로 처리"""
         try:
-            # 현재 봇 상태 수집
             bot_state = self._get_bot_state_summary()
 
-            response = req_lib.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": self._anthropic_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json"
-                },
-                json={
-                    "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": 1024,
-                    "system": f"""너는 업비트 자동거래봇의 AI 어시스턴트야. 사용자가 텔레그램으로 질문하면 현재 봇 상태를 기반으로 간결하게 답해.
+            system_prompt = f"""너는 업비트 자동거래봇의 AI 어시스턴트야. 사용자가 텔레그램으로 질문하면 현재 봇 상태를 기반으로 간결하게 답해.
 
 현재 봇 상태:
 {bot_state}
@@ -385,20 +377,28 @@ class TradingBotV3:
 - 한국어로 답변, 짧고 핵심만
 - 설정 변경 요청이면 구체적인 /명령어를 안내해
 - 매매 판단의 이유를 설명할 때 모멘텀, 시장 상태 등을 근거로 답해
-- 절대 거짓 정보를 만들어내지 마""",
-                    "messages": [{"role": "user", "content": text}]
-                },
-                timeout=30
+- 절대 거짓 정보를 만들어내지 마"""
+
+            prompt = f"{system_prompt}\n\n사용자 질문: {text}"
+
+            env = os.environ.copy()
+            env.pop("CLAUDECODE", None)
+            env.pop("CLAUDE_CODE_ENTRYPOINT", None)
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
+
+            result = subprocess.run(
+                ["/opt/homebrew/bin/claude", "-p", "--model", "haiku", prompt],
+                capture_output=True, text=True, timeout=60, env=env
             )
 
-            if response.status_code == 200:
-                data = response.json()
-                reply = data["content"][0]["text"]
-                self._tg_send(reply)
+            if result.returncode == 0 and result.stdout.strip():
+                self._tg_send(result.stdout.strip())
             else:
-                self._tg_send(f"⚠️ AI 응답 오류 ({response.status_code})")
-                print(f"⚠️ Claude API 오류: {response.status_code} {response.text[:200]}")
+                self._tg_send("⚠️ AI 응답을 가져올 수 없습니다.")
+                print(f"⚠️ Claude CLI 오류: rc={result.returncode} stderr={result.stderr[:200]}")
 
+        except subprocess.TimeoutExpired:
+            self._tg_send("⚠️ AI 응답 시간 초과 (60초)")
         except Exception as e:
             print(f"⚠️ 채팅 처리 오류: {e}")
             self._tg_send(f"⚠️ 처리 중 오류 발생: {e}")
@@ -410,6 +410,10 @@ class TradingBotV3:
         lines.append(f"잔고: {self.current_balance:,.0f}원")
         lines.append(f"매매 상태: {'일시중지' if getattr(self, '_tg_paused', False) else '가동 중'}")
         lines.append(f"최대 포지션: {self.MAX_POSITIONS}개")
+        lines.append(f"전체 스캔 대상: {len(self.coins)}개 코인 (KRW 마켓, 투자유의 제외)")
+        lines.append(f"거래 사이클 빠른 체크: 상위 30개 코인")
+        lines.append(f"전체 스캔: 모든 {len(self.coins)}개 코인 → 모멘텀 상위 10개 선별")
+        lines.append(f"매매 한도: 50만원 고정 / 분할매수 2회")
 
         # 포지션 현황
         if self.positions:
@@ -739,7 +743,7 @@ class TradingBotV3:
             loss = np.where(delta < 0, -delta, 0).mean()
 
             if loss == 0:
-                rsi = 100 if gain > 0 else 50
+                rsi = 100 if gain == 0 else 99  # gain>0이면 과매수(99), 둘다 0이면 중립(→50)
             else:
                 rs = gain / loss
                 rsi = 100 - (100 / (1 + rs))
@@ -810,32 +814,128 @@ class TradingBotV3:
             return 0
     
     def analyze_news_sentiment(self, coin):
-        """뉴스/SNS 센티먼트 분석 (0~100점) - RSS + Reddit + 인플루언서 감지"""
+        """뉴스/SNS 센티먼트 분석 (0~100점)
+        - RSS 글로벌 피드 (CoinTelegraph, Decrypt, Reddit/CryptoCurrency)
+        - 코인별 Reddit 서브레딧
+        - Fear & Greed Index (alternative.me, 1시간 캐시)
+        - CoinGecko 코인 뉴스 (무료 엔드포인트, 30분 캐시)
+        - 인플루언서(일론/트럼프 등) SNS 언급 보너스
+        """
         try:
-            # 캐시 확인 (30분마다 갱신)
             now = time.time()
-            if hasattr(self, '_news_cache') and hasattr(self, '_news_cache_time'):
-                if now - self._news_cache_time < 1800:
-                    return self._news_cache.get(coin, 50)
 
-            # RSS 피드에서 뉴스 + SNS 수집
-            feeds = [
-                "https://cointelegraph.com/rss",
-                "https://decrypt.co/feed",
-                "https://www.reddit.com/r/CryptoCurrency/.rss",
-                "https://www.reddit.com/r/Bitcoin/.rss",
-            ]
-            all_entries = []
-            for feed_url in feeds:
+            # 코인별 캐시 확인 (30분)
+            if not hasattr(self, '_news_cache'):
+                self._news_cache = {}
+            if coin in self._news_cache:
+                cached_time, cached_score = self._news_cache[coin]
+                if now - cached_time < 1800:
+                    return cached_score
+
+            # ── Fear & Greed Index (1시간 글로벌 캐시) ──────────────────
+            fear_greed = 50  # 기본 중립
+            try:
+                if not hasattr(self, '_fg_cache_time') or now - self._fg_cache_time >= 3600:
+                    fg_resp = req_lib.get("https://api.alternative.me/fng/",
+                                          timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+                    fg_data = fg_resp.json()
+                    fg_val = int(fg_data['data'][0]['value'])
+                    fg_cls = fg_data['data'][0]['value_classification']
+                    self._fg_cache = fg_val
+                    self._fg_cache_time = now
+                    print(f"  😱 Fear&Greed: {fg_val} ({fg_cls})")
+                fear_greed = getattr(self, '_fg_cache', 50)
+            except:
+                pass
+
+            # Fear&Greed → 시장 심리 조정값 (-15 ~ +10)
+            # 극단 공포(<20): 반등 가능 → 뉴스 점수 +10 가산
+            # 탐욕(>70): 고점 위험 → -10 패널티
+            if fear_greed < 20:
+                fg_adjust = 10
+            elif fear_greed < 40:
+                fg_adjust = 5
+            elif fear_greed <= 70:
+                fg_adjust = 0
+            elif fear_greed <= 85:
+                fg_adjust = -10
+            else:
+                fg_adjust = -15
+
+            # ── 글로벌 RSS 피드 (30분 공유 캐시) ────────────────────────
+            if not hasattr(self, '_rss_cache_time') or now - self._rss_cache_time >= 1800:
+                global_feeds = [
+                    "https://cointelegraph.com/rss",
+                    "https://decrypt.co/feed",
+                    "https://www.reddit.com/r/CryptoCurrency/.rss",
+                    "https://www.reddit.com/r/Bitcoin/.rss",
+                    "https://www.reddit.com/r/altcoin/.rss",
+                ]
+                self._rss_entries = []
+                def _fetch_rss(url):
+                    try:
+                        resp = req_lib.get(url, timeout=10,
+                                           headers={"User-Agent": "Mozilla/5.0"})
+                        return feedparser.parse(resp.text).entries[:20]
+                    except:
+                        return []
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = [executor.submit(_fetch_rss, u) for u in global_feeds]
+                    for f in as_completed(futures):
+                        self._rss_entries.extend(f.result())
+                self._rss_cache_time = now
+            all_entries = list(getattr(self, '_rss_entries', []))
+
+            # ── 코인별 Reddit 서브레딧 추가 ──────────────────────────────
+            coin_subreddits = {
+                "ETH": "ethereum", "SOL": "solana", "ADA": "cardano",
+                "AVAX": "Avax", "LINK": "Chainlink", "DOT": "dot",
+                "DOGE": "dogecoin", "XRP": "Ripple", "ATOM": "cosmosnetwork",
+                "NEAR": "nearprotocol", "UNI": "UniSwap", "FIL": "filecoin",
+                "ALGO": "algorand", "GRT": "thegraph", "SAND": "TheSandboxGaming",
+                "MANA": "decentraland", "AXS": "AxieInfinity", "YGG": "YieldGuildGames",
+            }
+            sub = coin_subreddits.get(coin.upper())
+            if sub:
                 try:
-                    resp = req_lib.get(feed_url, timeout=10,
-                                       headers={"User-Agent": "Mozilla/5.0"})
-                    feed = feedparser.parse(resp.text)
-                    all_entries.extend(feed.entries[:20])
+                    sub_cache_key = f"_sub_cache_{coin}"
+                    sub_time_key  = f"_sub_time_{coin}"
+                    if not hasattr(self, sub_cache_key) or now - getattr(self, sub_time_key, 0) >= 1800:
+                        sub_url = f"https://www.reddit.com/r/{sub}/.rss"
+                        sub_resp = req_lib.get(sub_url, timeout=8,
+                                               headers={"User-Agent": "Mozilla/5.0"})
+                        sub_feed = feedparser.parse(sub_resp.text)
+                        setattr(self, sub_cache_key, sub_feed.entries[:15])
+                        setattr(self, sub_time_key, now)
+                    all_entries.extend(getattr(self, sub_cache_key, []))
                 except:
-                    continue
+                    pass
 
-            # 코인별 별칭
+            # ── CoinGecko 코인 뉴스 (무료, 코인별 30분 캐시) ─────────────
+            cg_cache_key = f"_cg_news_{coin}"
+            cg_time_key  = f"_cg_news_time_{coin}"
+            if not hasattr(self, cg_cache_key) or now - getattr(self, cg_time_key, 0) >= 1800:
+                try:
+                    coin_id = self._get_coingecko_id(coin)
+                    cg_url = f"https://api.coingecko.com/api/v3/news"
+                    cg_resp = req_lib.get(cg_url, timeout=10,
+                                          params={"per_page": 10},
+                                          headers={"Accept": "application/json"})
+                    if cg_resp.status_code == 200:
+                        cg_news = cg_resp.json()
+                        # CoinGecko news는 title/description 필드
+                        class _E:
+                            def __init__(self, d): self._d = d
+                            def get(self, k, default=""): return self._d.get(k, default)
+                        cg_entries = [_E({"title": n.get("title",""), "summary": n.get("description","")})
+                                      for n in cg_news if isinstance(n, dict)]
+                        setattr(self, cg_cache_key, cg_entries)
+                        setattr(self, cg_time_key, now)
+                except:
+                    pass
+            all_entries.extend(getattr(self, cg_cache_key, []))
+
+            # ── 코인 별칭 정의 ────────────────────────────────────────────
             coin_aliases = {
                 "BTC": ["bitcoin", "btc", "비트코인"],
                 "ETH": ["ethereum", "eth", "이더리움", "ether"],
@@ -847,23 +947,41 @@ class TradingBotV3:
                 "MATIC": ["polygon", "matic"],
                 "DOT": ["polkadot", "dot"],
                 "LINK": ["chainlink", "link"],
+                "ATOM": ["cosmos", "atom"],
+                "NEAR": ["near", "nearprotocol"],
+                "UNI":  ["uniswap", "uni"],
+                "FIL":  ["filecoin", "fil"],
+                "YGG":  ["yield guild", "ygg"],
+                "BIGTIME": ["bigtime", "big time"],
+                "AGLD": ["adventure gold", "agld"],
+                "ID":   ["space id", " id "],
             }
-            aliases = coin_aliases.get(coin, [coin.lower()])
+            aliases = coin_aliases.get(coin.upper(), [coin.lower()])
 
-            # 긍정/부정 키워드
-            positive = ["surge", "rally", "bullish", "soar", "jump", "gain", "high",
-                        "breakout", "pump", "moon", "buy", "adopt", "approve", "launch",
-                        "partnership", "upgrade", "etf", "institutional",
-                        "상승", "급등", "돌파", "호재", "매수", "승인"]
-            negative = ["crash", "dump", "bearish", "plunge", "drop", "fall", "low",
-                        "ban", "hack", "fraud", "sell", "fear", "risk", "scam",
-                        "lawsuit", "sec", "regulation", "delay", "exploit",
-                        "하락", "급락", "폭락", "악재", "매도", "규제", "소송"]
-
-            # 인플루언서 키워드 (일론 머스크, 트럼프 등)
-            influencer_positive = ["elon", "musk", "tesla", "trump", "strategic reserve",
-                                   "일론", "머스크", "트럼프", "테슬라"]
-            influencer_boost = 0  # 인플루언서 언급 보너스
+            # ── 긍/부정 키워드 + 인플루언서 ──────────────────────────────
+            positive = [
+                "surge", "rally", "bullish", "soar", "jump", "gain", "high",
+                "breakout", "pump", "moon", "buy", "adopt", "approve", "launch",
+                "partnership", "upgrade", "etf", "institutional", "all-time high", "ath",
+                "listing", "mainnet", "airdrop", "staking", "yield",
+                "상승", "급등", "돌파", "호재", "매수", "승인", "상장",
+            ]
+            negative = [
+                "crash", "dump", "bearish", "plunge", "drop", "fall", "low",
+                "ban", "hack", "fraud", "sell", "fear", "risk", "scam",
+                "lawsuit", "sec", "regulation", "delay", "exploit", "rug",
+                "delist", "delisting", "warning", "caution", "vulnerable",
+                "하락", "급락", "폭락", "악재", "매도", "규제", "소송", "상장폐지",
+            ]
+            # SNS 인플루언서 (일론/트럼프/빌게이츠/캐시우드 등)
+            influencer_kw = [
+                "elon", "musk", "tesla", "spacex",
+                "trump", "strategic reserve", "whitehouse",
+                "cathie wood", "ark invest",
+                "michael saylor", "microstrategy",
+                "일론", "머스크", "트럼프", "테슬라",
+            ]
+            influencer_boost = 0
 
             pos_count = 0
             neg_count = 0
@@ -872,28 +990,26 @@ class TradingBotV3:
             for entry in all_entries:
                 text = (entry.get("title", "") + " " + entry.get("summary", "")).lower()
 
-                # 인플루언서가 코인 관련 언급했는지 체크 (전체 뉴스 대상)
-                has_influencer = any(inf in text for inf in influencer_positive)
+                # 인플루언서 × 코인/암호화폐 언급 감지
+                has_inf = any(kw in text for kw in influencer_kw)
                 has_coin_ref = any(alias in text for alias in aliases)
-                has_crypto_ref = any(w in text for w in ["crypto", "bitcoin", "암호화폐"])
+                has_crypto = any(w in text for w in ["crypto", "bitcoin", "암호화폐", "coin"])
 
-                if has_influencer and (has_coin_ref or has_crypto_ref):
-                    # 긍정적 맥락인지 확인
+                if has_inf and (has_coin_ref or has_crypto):
                     inf_pos = sum(1 for w in positive if w in text)
                     inf_neg = sum(1 for w in negative if w in text)
                     if inf_pos > inf_neg:
                         influencer_boost = min(influencer_boost + 15, 25)
                     elif inf_neg > inf_pos:
-                        influencer_boost = min(influencer_boost - 10, 0)
+                        influencer_boost = max(influencer_boost - 10, -15)
 
-                # 코인 관련 뉴스 센티먼트
                 if not has_coin_ref:
                     continue
                 mention_count += 1
                 pos_count += sum(1 for w in positive if w in text)
                 neg_count += sum(1 for w in negative if w in text)
 
-            # 점수 계산
+            # ── 점수 계산 ─────────────────────────────────────────────────
             if mention_count == 0:
                 score = 50
             else:
@@ -901,22 +1017,22 @@ class TradingBotV3:
                 if total_signals == 0:
                     score = 50
                 else:
-                    ratio = pos_count / total_signals
-                    score = int(ratio * 100)
-                # 언급량 보너스
+                    score = int(pos_count / total_signals * 100)
+                # 언급량 보너스 (최대 +10)
                 score = min(100, score + min(mention_count * 2, 10))
 
-            # 인플루언서 보너스 적용
+            # 인플루언서 보너스
             score = max(0, min(100, score + influencer_boost))
-
             if influencer_boost != 0:
-                print(f"  📢 {coin} 인플루언서 감지 (보너스: {influencer_boost:+d}점)")
+                print(f"  📢 {coin} 인플루언서 SNS 감지 (보너스: {influencer_boost:+d}점)")
 
-            # 캐시 저장
-            if not hasattr(self, '_news_cache'):
-                self._news_cache = {}
-            self._news_cache[coin] = score
-            self._news_cache_time = now
+            # Fear & Greed 조정
+            score = max(0, min(100, score + fg_adjust))
+            if fg_adjust != 0:
+                print(f"  😱 {coin} Fear&Greed({fear_greed}) 조정: {fg_adjust:+d}점")
+
+            # 캐시 저장 (코인별)
+            self._news_cache[coin] = (now, score)
 
             return score
         except:
@@ -1169,10 +1285,196 @@ class TradingBotV3:
             except:
                 pass
 
+            # 9) 장기 볼린저밴드 (일봉 기반, 데이터 길수록 신뢰도 높음)
+            try:
+                now_t = time.time()
+                if not hasattr(self, '_daily_bb_cache'):
+                    self._daily_bb_cache = {}
+
+                if coin in self._daily_bb_cache:
+                    cached_time, cached_score, cached_dl = self._daily_bb_cache[coin]
+                    if now_t - cached_time < 21600:  # 6시간 캐시
+                        if cached_dl >= 100:
+                            scores.append(cached_score)
+                            scores.append(cached_score)  # 장기 코인 2배 가중
+                        else:
+                            scores.append(cached_score)
+                else:
+                    ohlcv_d = pyupbit.get_ohlcv(ticker, interval="day", count=200)
+                    if ohlcv_d is not None and len(ohlcv_d) >= 30:
+                        daily_closes = np.array(ohlcv_d['close'], dtype=float)
+                        dl = len(daily_closes)
+                        ma_d = np.mean(daily_closes[-20:])
+                        sd_d = np.std(daily_closes[-20:])
+                        if sd_d > 0:
+                            upper_d = ma_d + 2 * sd_d
+                            lower_d = ma_d - 2 * sd_d
+                            c = daily_closes[-1]
+                            if c <= lower_d:
+                                bb_d_score = 95
+                            elif c <= lower_d + 0.3 * sd_d:
+                                bb_d_score = 75
+                            elif c <= ma_d:
+                                bb_d_score = 55
+                            elif c >= upper_d:
+                                bb_d_score = 5
+                            else:
+                                bb_d_score = 30
+                            self._daily_bb_cache[coin] = (now_t, bb_d_score, dl)
+                            if dl >= 100:
+                                scores.append(bb_d_score)
+                                scores.append(bb_d_score)  # 장기 코인 2배 가중
+                            else:
+                                scores.append(bb_d_score)
+            except:
+                pass
+
+            # 10) 캔들스틱 패턴 (1분봉 최근 5개) - 단기 반전 신호
+            try:
+                ohlcv_1m = pyupbit.get_ohlcv(ticker, interval="minute1", count=6)
+                if ohlcv_1m is not None and len(ohlcv_1m) >= 3:
+                    opens_1m  = np.array(ohlcv_1m['open'],  dtype=float)
+                    closes_1m = np.array(ohlcv_1m['close'], dtype=float)
+                    highs_1m  = np.array(ohlcv_1m['high'],  dtype=float)
+                    lows_1m   = np.array(ohlcv_1m['low'],   dtype=float)
+
+                    o, c, h, l = opens_1m[-1], closes_1m[-1], highs_1m[-1], lows_1m[-1]
+                    body       = abs(c - o)
+                    full_range = h - l
+                    lower_wick = min(o, c) - l
+                    upper_wick = h - max(o, c)
+
+                    if full_range > 0 and body > 0:
+                        # 망치형(Hammer): 아랫꼬리 >= 몸통 2배, 윗꼬리 <= 몸통 50%, 양봉
+                        if lower_wick >= body * 2 and upper_wick <= body * 0.5 and c >= o:
+                            scores.append(85)
+                        # 역망치형(Inverted Hammer): 윗꼬리 >= 몸통 2배, 아랫꼬리 <= 몸통 50%, 양봉
+                        elif upper_wick >= body * 2 and lower_wick <= body * 0.5 and c >= o:
+                            scores.append(70)
+                        # 도지(Doji): 몸통 < 전체 범위의 10%
+                        elif full_range > 0 and body / full_range < 0.10:
+                            scores.append(55)
+
+                    # 강세 장악패턴(Bullish Engulfing): 이전 음봉을 현재 양봉이 완전 포함
+                    if len(opens_1m) >= 2:
+                        prev_o, prev_c = opens_1m[-2], closes_1m[-2]
+                        curr_o, curr_c = opens_1m[-1], closes_1m[-1]
+                        if prev_c < prev_o and curr_c > curr_o:
+                            if curr_o <= prev_c and curr_c >= prev_o:
+                                scores.append(90)
+            except:
+                pass
+
+            # 11) 스토캐스틱 RSI (14봉 기반) - 과매도 구간 반전 포착
+            try:
+                if n >= 28:
+                    delta_c  = np.diff(closes)
+                    gains_sr  = np.where(delta_c > 0, delta_c, 0)
+                    losses_sr = np.where(delta_c < 0, -delta_c, 0)
+
+                    rsi_period = 14
+                    rsi_values = []
+                    for j in range(rsi_period, len(delta_c) + 1):
+                        ag = gains_sr[j - rsi_period:j].mean()
+                        al = losses_sr[j - rsi_period:j].mean()
+                        if al == 0:
+                            rsi_v = 99.0 if ag > 0 else 50.0
+                        else:
+                            rsi_v = 100 - (100 / (1 + ag / al))
+                        rsi_values.append(rsi_v)
+
+                    if len(rsi_values) >= 14:
+                        rsi_arr = np.array(rsi_values[-14:])
+                        r_min, r_max = rsi_arr.min(), rsi_arr.max()
+                        if r_max > r_min:
+                            stoch_rsi = (rsi_values[-1] - r_min) / (r_max - r_min) * 100
+                            if stoch_rsi < 20:
+                                scores.append(90)   # 과매도 → 반등 기대
+                            elif stoch_rsi < 40:
+                                scores.append(70)
+                            elif stoch_rsi < 60:
+                                scores.append(50)
+                            elif stoch_rsi < 80:
+                                scores.append(30)
+                            else:
+                                scores.append(10)   # 과매수
+            except:
+                pass
+
             valid = [s for s in scores if s is not None and not np.isnan(s)]
             return round(np.mean(valid), 1) if valid else 0
         except:
             return 0
+
+    def _get_coingecko_id(self, coin):
+        """코인 심볼 → CoinGecko ID 변환"""
+        mapping = {
+            "BTC": "bitcoin", "ETH": "ethereum", "XRP": "ripple",
+            "ADA": "cardano", "SOL": "solana", "DOGE": "dogecoin",
+            "AVAX": "avalanche-2", "MATIC": "matic-network", "DOT": "polkadot",
+            "LINK": "chainlink", "UNI": "uniswap", "ATOM": "cosmos",
+            "LTC": "litecoin", "BCH": "bitcoin-cash", "ETC": "ethereum-classic",
+            "NEAR": "near", "FTM": "fantom", "ALGO": "algorand",
+            "ICP": "internet-computer", "FIL": "filecoin",
+            "HBAR": "hedera-hashgraph", "SAND": "the-sandbox",
+            "MANA": "decentraland", "AXS": "axie-infinity",
+            "GRT": "the-graph", "ENJ": "enjincoin",
+            "AGLD": "adventure-gold", "BIGTIME": "big-time",
+            "YGG": "yield-guild-games", "ID": "space-id",
+            "1INCH": "1inch", "COMP": "compound-governance-token",
+            "SNX": "havven", "BAT": "basic-attention-token",
+        }
+        return mapping.get(coin.upper(), coin.lower())
+
+    def analyze_fundamentals(self, coin):
+        """코인 펀더멘털 점수 (CoinGecko, 24시간 캐시)
+        - developer_score: GitHub 커밋 활동 (0~100)
+        - community_score: Reddit/Twitter 활성도 (0~100)
+        - liquidity_score: 거래소 유동성 (0~100)
+        가중합: dev 40% + community 30% + liquidity 30%
+        """
+        try:
+            now = time.time()
+            if not hasattr(self, '_fundamental_cache'):
+                self._fundamental_cache = {}
+
+            if coin in self._fundamental_cache:
+                cached_time, cached_score = self._fundamental_cache[coin]
+                if now - cached_time < 86400:  # 24시간 캐시
+                    return cached_score
+
+            coin_id = self._get_coingecko_id(coin)
+            url = f"https://api.coingecko.com/api/v3/coins/{coin_id}"
+            params = {
+                "localization": "false", "tickers": "false",
+                "market_data": "false", "community_data": "true",
+                "developer_data": "true", "sparkline": "false"
+            }
+            resp = req_lib.get(url, params=params, timeout=15,
+                               headers={"Accept": "application/json"})
+
+            if resp.status_code != 200:
+                self._fundamental_cache[coin] = (now, 50)
+                return 50
+
+            data = resp.json()
+            dev_score  = float(data.get("developer_score",  0) or 0)
+            comm_score = float(data.get("community_score",  0) or 0)
+            liq_score  = float(data.get("liquidity_score",  0) or 0)
+
+            score = round(dev_score * 0.4 + comm_score * 0.3 + liq_score * 0.3, 1)
+            self._fundamental_cache[coin] = (now, score)
+
+            print(f"  📊 {coin} 펀더멘털: {score:.0f}점 "
+                  f"(개발:{dev_score:.0f} 커뮤:{comm_score:.0f} 유동:{liq_score:.0f})")
+            return score
+
+        except Exception as e:
+            print(f"  ⚠️ {coin} 펀더멘털 조회 실패: {e}")
+            if not hasattr(self, '_fundamental_cache'):
+                self._fundamental_cache = {}
+            self._fundamental_cache[coin] = (time.time(), 50)
+            return 50
 
     def _ema(self, data, period):
         """지수이동평균(EMA) 계산"""
@@ -1206,13 +1508,13 @@ class TradingBotV3:
 
             # 미국 시장 점수 (시장 강도에 가감)
             if avg_change >= 1.0:
-                result = ("강세", 10)     # 미국 강세 → 크립토에 호재
+                result = ("강세", -10)    # 미국 강세 → 크립토 호재 → 임계값 낮춤
             elif avg_change >= 0:
                 result = ("보통", 0)
             elif avg_change >= -1.0:
-                result = ("약세", -5)     # 미국 약세 → 주의
+                result = ("약세", 5)      # 미국 약세 → 주의 → 임계값 올림
             else:
-                result = ("급락", -10)    # 미국 급락 → 크립토 위험
+                result = ("급락", 10)     # 미국 급락 → 크립토 위험 → 임계값 많이 올림
 
             print(f"🇺🇸 미국시장: S&P500 {signals.get('S&P500', 0):+.2f}%, NASDAQ {signals.get('NASDAQ', 0):+.2f}% → {result[0]} ({result[1]:+d}점)")
 
@@ -1237,36 +1539,38 @@ class TradingBotV3:
             avg = np.mean(scores) if scores else 0
             
             if avg < -0.15:
-                return "극약세", 90
+                return "극약세", 95
             elif avg < -0.10:
                 return "심약세", 85
             elif avg < -0.05:
                 return "약세", 80
             elif avg < 0.03:
-                return "보통", 70
+                return "보통", 65
             else:
-                return "강세", 60
+                return "강세", 55
         except:
-            return "보통", 70
+            return "보통", 65
     
     def _calculate_momentum_inner(self, coin):
         """종합 모멘텀 점수 내부 계산"""
-        vol = self.analyze_volume(coin)
-        rsi = self.analyze_rsi(coin)
-        support = self.analyze_support_resistance(coin)
-        price = self.analyze_price_change(coin)
-        pattern = self.detect_patterns(coin)
-        news = self.analyze_news_sentiment(coin)
-        abnormal = self.detect_abnormal_trading(coin)
+        vol         = self.analyze_volume(coin)
+        rsi         = self.analyze_rsi(coin)
+        support     = self.analyze_support_resistance(coin)
+        price       = self.analyze_price_change(coin)
+        pattern     = self.detect_patterns(coin)
+        news        = self.analyze_news_sentiment(coin)
+        fundamental = self.analyze_fundamentals(coin)
+        abnormal    = self.detect_abnormal_trading(coin)
 
-        # 가중치 합산 (GUIDE.md 스펙: 25/25/15/15/10/10)
+        # 가중치 합산 (vol 15 / rsi 15 / support 10 / price 15 / pattern 20 / news 20 / fundamental 5)
         total = (
-            vol     * 0.25 +   # 거래량 25%
-            rsi     * 0.25 +   # RSI 25%
-            support * 0.15 +   # 지지선 15%
-            price   * 0.15 +   # 가격 상승률 15%
-            pattern * 0.10 +   # 패턴 10%
-            news    * 0.10     # 뉴스/SNS 10%
+            vol         * 0.15 +   # 거래량 15%
+            rsi         * 0.15 +   # RSI 15%
+            support     * 0.10 +   # 지지선 10%
+            price       * 0.15 +   # 가격 상승률 15%
+            pattern     * 0.20 +   # 패턴 20% (캔들스틱+스토캐스틱RSI 포함)
+            news        * 0.20 +   # 뉴스/SNS 20% (Fear&Greed+Reddit+CoinGecko+인플루언서)
+            fundamental * 0.05     # 펀더멘털 5% (CoinGecko dev/community/liquidity)
         )
 
         # 이상 거래 보너스/페널티 적용
@@ -1279,38 +1583,58 @@ class TradingBotV3:
         return round(min(100, max(0, total)), 1)
 
     def calculate_momentum(self, coin):
-        """종합 모멘텀 점수 (0~100점) - 15초 타임아웃 보호"""
+        """종합 모멘텀 점수 (0~100점) - 5분 캐시 + 15초 타임아웃 보호"""
+        now = time.time()
+        if not hasattr(self, '_momentum_cache'):
+            self._momentum_cache = {}
+        cached = self._momentum_cache.get(coin)
+        if cached and now - cached[0] < 300:
+            return cached[1]
+
         result, err = _run_with_timeout(
             lambda: self._calculate_momentum_inner(coin), timeout=15
         )
-        if err or result is None:
-            return 0
-        return result
+        score = result if result is not None and not err else 0
+        self._momentum_cache[coin] = (now, score)
+        return score
     
     # ============================================
     # 2. 코인 선택 (카테고리 다른 것)
     # ============================================
     
     def select_coins(self):
-        """전체 마켓 스캔 후 모멘텀 상위 코인 선택"""
-        print(f"🔍 전체 {len(self.coins)}개 코인 스캔 중...")
+        """전체 마켓 스캔 후 모멘텀 상위 코인 선택 (병렬 처리)"""
+        total = len(self.coins)
+        print(f"🔍 전체 {total}개 코인 병렬 스캔 중 (워커 4개)...")
         sys.stdout.flush()
         scores = {}
         skip_count = 0
-        for i, coin in enumerate(self.coins):
+        done_count = 0
+        lock = threading.Lock()
+
+        def _scan_coin(coin):
             try:
                 score = self.calculate_momentum(coin)
-                if score is not None:
-                    scores[coin] = score
+                return coin, score
             except Exception:
-                skip_count += 1
-            if (i + 1) % 20 == 0:
-                msg = f"  ... {i+1}/{len(self.coins)} 스캔 완료"
-                if skip_count > 0:
-                    msg += f" (스킵 {skip_count}건)"
-                print(msg)
-                sys.stdout.flush()
-            time.sleep(0.1)
+                return coin, None
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(_scan_coin, c): c for c in self.coins}
+            for future in as_completed(futures):
+                coin, score = future.result()
+                with lock:
+                    done_count += 1
+                    if score is not None:
+                        scores[coin] = score
+                    else:
+                        skip_count += 1
+                    if done_count % 40 == 0 or done_count == total:
+                        msg = f"  ... {done_count}/{total} 스캔 완료"
+                        if skip_count > 0:
+                            msg += f" (스킵 {skip_count}건)"
+                        print(msg)
+                        sys.stdout.flush()
 
         sorted_coins = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         # 상위 10개 출력
@@ -1329,7 +1653,7 @@ class TradingBotV3:
     
     MAX_POSITIONS = 2  # 최대 동시 보유 코인 수
 
-    def place_buy_order(self, coin, amount):
+    def place_buy_order(self, coin, amount, momentum=0):
         """매수 주문 (최대 2종목 제한 포함)"""
         try:
             # ★ 텔레그램 /pause 상태면 매수 차단
@@ -1390,8 +1714,8 @@ class TradingBotV3:
                 'timestamp': datetime.now().isoformat()
             }
 
-            print(f"✅ [매수] {coin} {amount:,}원 @ {price:,.0f}원")
-            self._db_log_trade(coin, "buy", price, quantity, amount, batch=batch_id)
+            print(f"✅ [매수] {coin} {amount:,}원 @ {price:,.0f}원 (모멘텀 {momentum}점)")
+            self._db_log_trade(coin, "buy", price, quantity, amount, momentum=momentum, batch=batch_id)
             self._save_positions()
             self._notify(f"[BUY] {coin} {batch_id} | {amount:,}원 @ {price:,.0f}원 | 잔고: {self.current_balance:,.0f}원")
             return True
@@ -1477,13 +1801,32 @@ class TradingBotV3:
         # 포지션 모니터링
         self.monitor_positions()
 
-        # 2차 분할매수 처리 (5분 경과된 것)
+        # 2차 분할매수 처리 (5분 경과된 것) - 모멘텀 재확인 후 실행
         for coin in list(self._pending_2nd_buy.keys()):
             entry = self._pending_2nd_buy[coin]
             if time.time() - entry['time'] >= entry['wait']:
-                print(f"📥 {coin} 2차 분할매수 실행 ({entry['amount']:,}원)")
-                self.place_buy_order(coin, entry['amount'])
-                del self._pending_2nd_buy[coin]
+                # 1차 매수 후 모멘텀 재확인 (붕괴 시 2차 매수 취소)
+                mom_2nd = self.calculate_momentum(coin)
+                if mom_2nd < 35:
+                    print(f"🚫 {coin} 2차 매수 취소: 모멘텀 붕괴 ({mom_2nd}점 < 35점)")
+                    del self._pending_2nd_buy[coin]
+                elif coin not in self.positions:
+                    print(f"🚫 {coin} 2차 매수 취소: 이미 매도된 포지션")
+                    del self._pending_2nd_buy[coin]
+                else:
+                    # ★ 물타기 조건 강화: 1차 매수가 대비 -2% 이하일 때만 2차 진입
+                    batch1_pos = self.positions[coin].get('batch_1')
+                    if batch1_pos:
+                        current_price = self.get_price(coin)
+                        if current_price:
+                            price_drop = (current_price - batch1_pos['buy_price']) / batch1_pos['buy_price']
+                            if price_drop > -0.02:
+                                print(f"⏳ {coin} 2차 매수 대기: 1차 대비 {price_drop*100:+.2f}% (기준 -2% 미달, 5분 연장)")
+                                entry['time'] = time.time()  # 5분 후 재시도
+                                continue
+                    print(f"📥 {coin} 2차 분할매수 실행 ({entry['amount']:,}원, 모멘텀 {mom_2nd}점)")
+                    self.place_buy_order(coin, entry['amount'], momentum=mom_2nd)
+                    del self._pending_2nd_buy[coin]
 
         # 시장 강도 확인
         market_strength, min_score = self.check_market_strength()
@@ -1505,7 +1848,7 @@ class TradingBotV3:
         print(f"🎯 선택된 코인: {selected}\n")
         
         # 각 코인 처리 (매매 한도 = 초기 50만 + 누적 수익)
-        BASE_BUDGET = 500000
+        BASE_BUDGET = 1000000
         total_profit = sum(t.get('profit_rate', 0) / 100 * BASE_BUDGET for t in self.trades if t.get('profit_rate', 0) > 0)
         MAX_TRADING_BUDGET = int(BASE_BUDGET + max(0, total_profit))
         if self.mode == "real" and self.upbit:
@@ -1555,6 +1898,12 @@ class TradingBotV3:
                 print(f"🚫 {coin} 투자유의/거래종료 예정 → 절대 매수 금지")
                 continue
 
+            # 스테이블코인 필터 (이익 불가)
+            _STABLECOINS = {"USDT", "USDC", "BUSD", "DAI", "TUSD", "USDP", "USD1", "FDUSD"}
+            if coin in _STABLECOINS:
+                print(f"🚫 {coin} 스테이블코인 → 매수 금지")
+                continue
+
             # 가용 금액 부족 체크
             if available < 10000:
                 print("💸 가용 금액 부족 → 매수 중단")
@@ -1577,6 +1926,16 @@ class TradingBotV3:
                 print(f" ⚠️ 고점 근접 → 매수 보류")
                 continue
 
+            # 상승 추세 확인 (85점 미만은 반드시 상승 추세여야 매수)
+            if momentum >= min_score and momentum < 85 and not self._is_uptrend(coin):
+                print(f" ⚠️ 상승 추세 아님 → 매수 보류")
+                continue
+
+            # 최소 상승 여력 확인 (1시간 내 1.5%+ 상승 & 천장 아닌 코인만)
+            if momentum >= min_score and not self._has_min_upside(coin):
+                print(f" ⚠️ 상승 여력 부족 (1시간 1.5% 미만) → 매수 보류")
+                continue
+
             if momentum >= min_score:
                 # 고득점(85+) 과투자: 가용금액의 70%까지, 일반: 반반(50%)
                 if momentum >= 85 and remaining_slots >= 1:
@@ -1591,7 +1950,7 @@ class TradingBotV3:
                     continue
                 print(f" ✅ 매수 (1차: {buy_amount:,}원)")
                 # 1차 매수 (코인당 할당의 50%)
-                self.place_buy_order(coin, buy_amount)
+                self.place_buy_order(coin, buy_amount, momentum=momentum)
                 available -= buy_amount
                 remaining_slots -= 1
                 # 2차 매수는 5분 후 별도 처리 (저점 매입)
@@ -1604,6 +1963,33 @@ class TradingBotV3:
             else:
                 print(" ❌ 패스")
     
+    def _has_min_upside(self, coin, min_pct=0.010):
+        """최소 상승 여력 확인 - 최근 1시간 상승률 + 저점 대비 여력"""
+        try:
+            ticker = f"KRW-{coin}"
+            ohlcv = pyupbit.get_ohlcv(ticker, interval="minute5", count=12)  # 최근 1시간
+            if ohlcv is None or len(ohlcv) < 6:
+                return False
+            closes = list(ohlcv['close'])
+            highs = list(ohlcv['high'])
+            current = closes[-1]
+            low_1h = min(closes)
+            high_1h = max(highs)
+
+            # 1) 최근 1시간 상승률이 1.5% 이상이어야 함 (모멘텀 있음)
+            change_1h = (current - closes[0]) / closes[0]
+            if change_1h < min_pct:
+                return False
+
+            # 2) 고점 대비 너무 가깝지 않아야 함 (추가 상승 여력)
+            #    고점의 99% 이상이면 천장 근접 → 상승 여력 부족
+            if high_1h > 0 and current >= high_1h * 0.99:
+                return False
+
+            return True
+        except:
+            return False
+
     def _is_uptrend(self, coin):
         """현재 상승 추세인지 판단"""
         try:
@@ -1665,7 +2051,7 @@ class TradingBotV3:
                     continue  # 투자유의/거래종료 예정 제외
                 try:
                     mom = self.calculate_momentum(coin)
-                    if mom > current_momentum + 15 and not self._is_near_high(coin):
+                    if mom > current_momentum + 20 and not self._is_near_high(coin):
                         candidates.append((coin, mom))
                     time.sleep(0.1)
                 except:
@@ -1701,17 +2087,33 @@ class TradingBotV3:
                 position = self.positions[coin][batch_id]
                 profit_rate = (price - position['buy_price']) / position['buy_price']
                 hours = self._hours_held(position)
+
+                # ★ 빠른 컷: 매수 후 3분 이내 -0.5% 이하 하락 → 즉시 손절
+                minutes_held = hours * 60
+                if minutes_held <= 3 and profit_rate <= -0.005:
+                    print(f"✂️ {coin} {batch_id} 빠른 컷 ({minutes_held:.0f}분 보유, {profit_rate*100:+.2f}% ≤ -0.5%)")
+                    self.place_sell_order(coin, batch_id)
+                    self._sell_cooldown[coin] = time.time()
+                    continue
+
                 momentum = self.calculate_momentum(coin)
                 uptrend = self._is_uptrend(coin)
 
-                # === 1. 모멘텀 급락 → 즉시 매도 (급락 방어) ===
-                if momentum < 30 and profit_rate > 0:
+                # === 1-1. 모멘텀 붕괴 → 무조건 탈출 (20점 미만은 죽은 코인) ===
+                if momentum < 20 and profit_rate < 0.015:
+                    print(f"💀 {coin} {batch_id} 모멘텀 붕괴({momentum}점) → 즉시 탈출 ({profit_rate*100:+.2f}%)")
+                    self.place_sell_order(coin, batch_id)
+                    self._sell_cooldown[coin] = time.time()
+                    continue
+
+                # === 1-2. 모멘텀 급락 → 즉시 매도 (급락 방어, 최소 1.5% 이상만) ===
+                if momentum < 30 and profit_rate >= 0.015:
                     print(f"⚡ {coin} {batch_id} 모멘텀 급락({momentum}점) → 즉시 매도 ({profit_rate*100:+.2f}%)")
                     self.place_sell_order(coin, batch_id)
                     self._sell_cooldown[coin] = time.time()
                     continue
 
-                # === 2. 익절 (모멘텀 기반) ===
+                # === 2. 익절 (모멘텀 기반 + 트레일링 스탑) ===
                 if momentum >= 90:
                     target = 0.10
                 elif momentum >= 70:
@@ -1721,50 +2123,74 @@ class TradingBotV3:
                 else:
                     target = 0.05
 
+                # ★ 트레일링 스탑: +1% 수익 달성 시 고점 추적, 고점 대비 -1% 하락 시 매도
+                trailing_key = f"{coin}_{batch_id}_peak"
+                TRAILING_START = 0.01   # +1% 이상이면 고점 추적 시작
+                TRAILING_STOP  = 0.01   # 고점 대비 -1% 하락 시 매도
+                if profit_rate >= TRAILING_START:
+                    if not hasattr(self, '_trailing_peaks'):
+                        self._trailing_peaks = {}
+                    current_peak = self._trailing_peaks.get(trailing_key, 0)
+                    if profit_rate > current_peak:
+                        self._trailing_peaks[trailing_key] = profit_rate
+                        current_peak = profit_rate
+                    if current_peak - profit_rate >= TRAILING_STOP:
+                        print(f"📉 {coin} {batch_id} 트레일링 스탑 (고점 {current_peak*100:+.2f}% → 현재 {profit_rate*100:+.2f}%)")
+                        if trailing_key in self._trailing_peaks:
+                            del self._trailing_peaks[trailing_key]
+                        self.place_sell_order(coin, batch_id)
+                        continue
+                else:
+                    # 추적 시작 기준 미달 시 고점 초기화
+                    if hasattr(self, '_trailing_peaks') and trailing_key in self._trailing_peaks:
+                        del self._trailing_peaks[trailing_key]
+
                 if profit_rate >= target:
                     print(f"💰 {coin} {batch_id} 익절 ({profit_rate*100:+.2f}% >= {target*100}%)")
+                    if hasattr(self, '_trailing_peaks') and trailing_key in self._trailing_peaks:
+                        del self._trailing_peaks[trailing_key]
                     self.place_sell_order(coin, batch_id)
                     continue
 
-                # === 3. 손절 (시간 경과에 따라 기준 강화) ===
-                # 1시간 이내: -5% 손절
-                # 1~3시간: -3% 손절 (묶임 방지)
-                # 3시간+: -2% 손절 (빠른 탈출)
-                if hours >= 3:
-                    stop_loss = -0.02
-                elif hours >= 1:
-                    stop_loss = -0.03
+                # === 3. 손절 (모멘텀 비례, 기본 -5%) ===
+                # 기본 손절 -5%, 모멘텀 붕괴 시 비례적으로 더 빠르게 탈출
+                if momentum < 20:
+                    stop_loss = -0.01  # 완전 붕괴 → 즉시 탈출
+                elif momentum < 35:
+                    stop_loss = -0.02  # 급락 → 빠른 탈출
+                elif momentum < 50:
+                    stop_loss = -0.03  # 약세 → 조기 탈출
                 else:
-                    stop_loss = -0.05
+                    stop_loss = -0.05  # 기본 손절 -5%
 
                 if profit_rate <= stop_loss:
-                    print(f"🔻 {coin} {batch_id} 손절 ({profit_rate*100:+.2f}%, 기준 {stop_loss*100}%, {hours:.1f}시간 보유)")
+                    print(f"🔻 {coin} {batch_id} 손절 ({profit_rate*100:+.2f}%, 기준 {stop_loss*100:.0f}%, 모멘텀 {momentum:.0f}점)")
                     self.place_sell_order(coin, batch_id)
                     self._sell_cooldown[coin] = time.time()
                     continue
 
-                # === 4. 횡보 감지 → 교체 (2시간 이상 보유 & 수익 ±1% 이내) ===
-                if hours >= 2 and abs(profit_rate) < 0.01 and not uptrend:
+                # === 4. 횡보 감지 → 교체 (3시간 이상 보유 & 수익 ±1.5% 이내) ===
+                if hours >= 3 and abs(profit_rate) < 0.015 and not uptrend:
                     better = self._find_better_coin(coin, momentum)
                     if better:
                         better_coin, better_mom = better
                         print(f"🔄 {coin} {batch_id} 횡보 {hours:.1f}시간 ({profit_rate*100:+.2f}%) → {better_coin}({better_mom}점)으로 교체")
                         if self.place_sell_order(coin, batch_id):
                             time.sleep(2)
-                            self.place_buy_order(better_coin, position['amount'])
+                            self.place_buy_order(better_coin, position['amount'], momentum=better_mom)
                         continue
                     else:
                         print(f"  ⏳ {coin} {batch_id} 횡보 {hours:.1f}시간, 더 좋은 대안 없음 → 유지")
 
-                # === 5. 더 좋은 모멘텀 스왑 (보유 3시간+, 소폭 이익, 비상승추세) ===
-                if hours >= 3 and 0 < profit_rate < 0.02 and not uptrend:
+                # === 5. 더 좋은 모멘텀 스왑 (보유 4시간+, 소폭 이익, 비상승추세) ===
+                if hours >= 4 and 0 < profit_rate < 0.02 and not uptrend:
                     better = self._find_better_coin(coin, momentum)
                     if better:
                         better_coin, better_mom = better
                         print(f"🔀 {coin} {batch_id} 소폭 이익({profit_rate*100:+.2f}%) + 비상승 → {better_coin}({better_mom}점)으로 스왑")
                         if self.place_sell_order(coin, batch_id):
                             time.sleep(2)
-                            self.place_buy_order(better_coin, position['amount'])
+                            self.place_buy_order(better_coin, position['amount'], momentum=better_mom)
                         continue
 
                 # 상태 출력
@@ -1801,7 +2227,20 @@ class TradingBotV3:
         print(f"\n거래 이력: {len(self.trades)}건")
     
     def save_log(self):
-        """로그 저장"""
+        """로그 저장 (logs/ 폴더, 7일 이상 자동 삭제)"""
+        log_dir = os.path.join(os.path.dirname(__file__), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        # 7일 이상된 로그 자동 삭제
+        try:
+            cutoff = time.time() - 7 * 86400
+            for f in os.listdir(log_dir):
+                fpath = os.path.join(log_dir, f)
+                if f.startswith("trading_log_") and f.endswith(".json") and os.path.getmtime(fpath) < cutoff:
+                    os.remove(fpath)
+        except Exception:
+            pass
+
         log = {
             'timestamp': datetime.now().isoformat(),
             'mode': self.mode,
@@ -1811,11 +2250,12 @@ class TradingBotV3:
             'positions': self.positions,
             'trades': self.trades[:100]  # 최근 100개
         }
-        
+
         filename = f"trading_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        with open(filename, 'w', encoding='utf-8') as f:
+        filepath = os.path.join(log_dir, filename)
+        with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(log, f, indent=2, ensure_ascii=False)
-        
+
         print(f"✅ 로그 저장됨: {filename}")
     
     # ============================================
@@ -1923,10 +2363,12 @@ if __name__ == "__main__":
 
                 # 뉴스 갱신 (30분마다)
                 if now - last_news_refresh >= NEWS_INTERVAL:
-                    print(f"\n📰 [{datetime.now().strftime('%H:%M:%S')}] 뉴스 갱신 중...")
-                    # 캐시 초기화 → 다음 calculate_momentum에서 자동 갱신
-                    if hasattr(bot, '_news_cache'):
-                        del bot._news_cache
+                    print(f"\n📰 [{datetime.now().strftime('%H:%M:%S')}] 뉴스 캐시 초기화...")
+                    # 글로벌 RSS 캐시 초기화 → 다음 analyze_news_sentiment에서 자동 갱신
+                    for attr in ('_news_cache', '_rss_entries', '_rss_cache_time',
+                                 '_fg_cache', '_fg_cache_time'):
+                        if hasattr(bot, attr):
+                            delattr(bot, attr)
                     last_news_refresh = now
 
                 # 시장 체크 (5분마다)

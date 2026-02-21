@@ -6,10 +6,14 @@
 
 BOT_DIR="/Users/600mac/Desktop/업비트자동"
 PID_FILE="${BOT_DIR}/bot.pid"
-LOG_FILE="${BOT_DIR}/watchdog.log"
+LOG_DIR="${BOT_DIR}/logs"
+LOG_FILE="${LOG_DIR}/watchdog.log"
 PYTHON="${BOT_DIR}/venv/bin/python"
 BOT_SCRIPT="${BOT_DIR}/upbit_bot_v3_0_complete.py"
-BOT_STDOUT="${BOT_DIR}/bot_output.log"
+BOT_STDOUT="${LOG_DIR}/bot_output.log"
+
+# logs 폴더 생성
+mkdir -p "$LOG_DIR"
 
 # 텔레그램 설정
 TG_TOKEN="8481220569:AAHVSypL0kUN21ehhxG0uKGCz3PpIXkdm28"
