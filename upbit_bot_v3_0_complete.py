@@ -152,7 +152,7 @@ class TradingBotV3:
         # v4.3: 과매매 방지
         self._daily_coin_buys = {}     # {coin: count} 코인별 일일 매수 횟수
         self._daily_reset_date = None  # 마지막 리셋 날짜
-        self._max_daily_coin_buys = 3  # 같은 코인 하루 최대 3회
+        self._max_daily_coin_buys = 2  # v5.2: 같은 코인 하루 최대 2회 (재진입 손실 방지)
         self._max_batch = 4            # 추가매수 최대 batch_4까지
 
         # v4.4: 자동 학습 시스템 (Auto-Tune)
@@ -2505,7 +2505,7 @@ class TradingBotV3:
             print(f"⚠️ [AutoTune] 오류: {e}")
 
     def calculate_momentum(self, coin):
-        """종합 모멘텀 점수 (0~100점) - 5분 캐시 + 15초 타임아웃 보호"""
+        """종합 모멘텀 점수 (0~100점) - 5분 캐시 + 15초 타임아웃 + v5.2 EMA 평활화"""
         now = time.time()
         if not hasattr(self, '_momentum_cache'):
             self._momentum_cache = {}
@@ -2516,7 +2516,14 @@ class TradingBotV3:
         result, err = _run_with_timeout(
             lambda: self._calculate_momentum_inner(coin), timeout=15
         )
-        score = result if result is not None and not err else 0
+        raw_score = result if result is not None and not err else 0
+
+        # v5.2: EMA 평활화 — 이전 값과 7:3 가중 (급변 방지)
+        if cached and cached[1] > 0:
+            score = round(raw_score * 0.7 + cached[1] * 0.3, 1)
+        else:
+            score = raw_score
+
         self._momentum_cache[coin] = (now, score)
         return score
     
@@ -3258,6 +3265,17 @@ class TradingBotV3:
                 if buy_amount < 5000:
                     print(f" 💸 매수금액 부족 ({buy_amount:,}원) → 패스")
                     continue
+                # v5.2: 저항선이 현재가 +1% 미만이면 진입 차단 (잔챙이 익절 방지)
+                try:
+                    _sr_check = self._calc_sr_levels(coin)
+                    _cur_price = self.get_price(coin)
+                    if _sr_check and _cur_price and _sr_check.get('nearest_resistance'):
+                        _upside = (_sr_check['nearest_resistance'] - _cur_price) / _cur_price
+                        if _upside < 0.01:
+                            print(f" ⚠️ 저항선 {_sr_check['nearest_resistance']:,.0f} 너무 가까움 (+{_upside*100:.2f}%) → 패스")
+                            continue
+                except:
+                    pass
                 print(f" ✅ 매수 (1차: {buy_amount:,}원)")
                 # 1차 매수 (코인당 할당의 50%)
                 self._current_buy_is_strong = coin_is_strong
