@@ -147,6 +147,7 @@ class TradingBotV3:
         self._surge_positions = {}     # {coin: {buy_price, amount, quantity, timestamp, peak_rate}}
         self._surge_max = 1            # 동시 서지 포지션 최대 1개
         self._last_surge_entry = 0     # 마지막 서지 진입 시각
+        self._surge_coin_count = {}    # v5.1: 코인별 surge 진입 횟수 (같은 코인 2회 제한)
 
         # v4.3: 과매매 방지
         self._daily_coin_buys = {}     # {coin: count} 코인별 일일 매수 횟수
@@ -3142,9 +3143,9 @@ class TradingBotV3:
                         _closes = list(_oh['close'])
                         _total_value = sum(v * c for v, c in zip(_vols, _closes))
                         if _total_value >= 2_000_000_000:  # 24h 거래대금 20억원 이상이면 유동성 충분 (5억→20억 상향)
-                            # v4.2: 개별 강세라도 모멘텀 최소 40점 필요 (과열 추격 방지)
-                            if momentum < 40:
-                                print(f" ⚠️ 개별 강세(24h {_chg*100:+.1f}%)지만 모멘텀 {momentum}점 < 40점 → 과열 추격 방지, 패스")
+                            # v5.0: 개별 강세 모멘텀 15점으로 완화 (15~39점은 반감 진입)
+                            if momentum < 15:
+                                print(f" ⚠️ 개별 강세(24h {_chg*100:+.1f}%)지만 모멘텀 {momentum}점 < 15점 → 과열 추격 방지, 패스")
                                 coin_is_strong = False
                                 continue
                             # 고점 대비 -3% 이상 되돌림이면 이미 덤프 시작 → 패스
@@ -3153,7 +3154,13 @@ class TradingBotV3:
                             if (_current - _high_24h) / _high_24h < -0.03:
                                 print(f" ⚠️ 개별 강세지만 고점 대비 {(_current - _high_24h) / _high_24h * 100:.1f}% 되돌림 → 패스")
                                 continue
-                            print(f" 🔥 개별 강세 (24h {_chg*100:+.1f}%, 모멘텀 {momentum}점, 거래대금 {_total_value/1e8:.1f}억) → 시장 무관 진입!", end="")
+                            # v5.0: 모멘텀 15~39점 → 반감 진입 (리스크 관리)
+                            if momentum < 40:
+                                self._strong_half_budget = True
+                                print(f" 🔥 개별 강세 (24h {_chg*100:+.1f}%, 모멘텀 {momentum}점 → 반감 진입, 거래대금 {_total_value/1e8:.1f}억)", end="")
+                            else:
+                                self._strong_half_budget = False
+                                print(f" 🔥 개별 강세 (24h {_chg*100:+.1f}%, 모멘텀 {momentum}점, 거래대금 {_total_value/1e8:.1f}억) → 시장 무관 진입!", end="")
                         else:
                             print(f" ⚠️ 개별 강세지만 거래대금 부족({_total_value/1e8:.1f}억 < 20억) → 패스")
                             continue
@@ -3239,6 +3246,10 @@ class TradingBotV3:
                 else:
                     coin_budget = min(per_coin_budget, available)
 
+                # v5.0: 개별 강세 반감 진입
+                if getattr(self, '_strong_half_budget', False) and coin_is_strong:
+                    coin_budget = coin_budget // 2
+                    self._strong_half_budget = False
                 # 집중투자: 1차 40% + 2차 30% + 3차 30%, 일반: 1차 50% + 2차 50%
                 if is_concentrate:
                     buy_amount = int(coin_budget * 0.4)
@@ -3587,6 +3598,8 @@ class TradingBotV3:
                     self.trades.append({'coin': coin, 'batch': 'idle_trade', 'buy_price': pos['buy_price'],
                                         'sell_price': price, 'profit_rate': profit_rate * 100,
                                         'timestamp': datetime.now().isoformat()})
+                    self._db_log_trade(coin, "sell", price, pos['quantity'], pos['amount'] + profit,
+                                       profit=profit, profit_rate=profit_rate * 100, batch='idle_trade')
                     self._notify(f"[IDLE ✅] {coin} +{profit_rate*100:.2f}% (+{profit:,}원) | {elapsed_min:.0f}분")
                     del self._scalp_positions[coin]
                     self._save_positions()
@@ -3612,6 +3625,8 @@ class TradingBotV3:
                     self.trades.append({'coin': coin, 'batch': 'idle_trade', 'buy_price': pos['buy_price'],
                                         'sell_price': price, 'profit_rate': profit_rate * 100,
                                         'timestamp': datetime.now().isoformat()})
+                    self._db_log_trade(coin, "sell", price, pos['quantity'], pos['amount'] + loss,
+                                       profit=loss, profit_rate=profit_rate * 100, batch='idle_trade')
                     self._notify(f"[IDLE ❌] {coin} {profit_rate*100:.2f}% ({loss:,}원) | {elapsed_min:.0f}분")
                     del self._scalp_positions[coin]
                     self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': True, 'source': 'idle', 'exit_price': price}
@@ -3638,6 +3653,8 @@ class TradingBotV3:
                     self.trades.append({'coin': coin, 'batch': 'idle_trade', 'buy_price': pos['buy_price'],
                                         'sell_price': price, 'profit_rate': profit_rate * 100,
                                         'timestamp': datetime.now().isoformat()})
+                    self._db_log_trade(coin, "sell", price, pos['quantity'], pos['amount'] + profit,
+                                       profit=profit, profit_rate=profit_rate * 100, batch='idle_trade')
                     del self._scalp_positions[coin]
                     self._save_positions()
                     continue
@@ -3712,6 +3729,11 @@ class TradingBotV3:
                 quantity = idle_budget / price
                 print(f"💎 [중타 진입] {best_coin} 모멘텀 {best_mom}점 + 상승추세 + 거래량 OK → {idle_budget:,}원")
                 if self.mode == "real" and self.upbit:
+                    # v5.1: 실제 잔고 확인 후 매수
+                    real_krw = self._get_krw_balance()
+                    if real_krw < idle_budget:
+                        print(f"⚠️ 중타 {best_coin} 잔고 부족 (필요 {idle_budget:,}, 보유 {real_krw:,.0f}원)")
+                        return
                     result = self.upbit.buy_market_order(f"KRW-{best_coin}", idle_budget)
                     if result is None or (isinstance(result, dict) and 'error' in result):
                         return
@@ -3734,27 +3756,57 @@ class TradingBotV3:
                     'timestamp': now
                 }
                 self._last_idle_entry = now
+                self._db_log_trade(best_coin, "buy", price, quantity, idle_budget, batch='idle_trade')
                 self._notify(f"[IDLE] {best_coin} 모멘텀 {best_mom}점 | {idle_budget:,}원 진입")
 
         except Exception as e:
             print(f"⚠️ 유휴자금 중타 오류: {e}")
 
     def _detect_surge_coins(self):
-        """5분봉 기준 급등 코인 탐지 + 펌프앤덤프 필터 + 눌림목 타이밍"""
+        """v5.0: 전체 코인 급등 탐지 — ticker API 1차 필터 + 점수제 + 초기 급등 감지"""
         try:
             owned = set(self.positions.keys()) | set(self._scalp_positions.keys()) | set(self._surge_positions.keys())
             cooldown_coins = set(self._sell_cooldown.keys())
+            # v5.1: 같은 코인 2회 초과 진입 차단
+            maxed_coins = {c for c, n in self._surge_coin_count.items() if n >= 2}
             candidates = []
 
-            for coin in self.coins[:40]:
-                if coin in owned or coin in cooldown_coins:
+            # ── 1단계: ticker API로 전체 코인 1차 필터 (API 1회) ──
+            import requests as _req
+            try:
+                _markets = ",".join(f"KRW-{c}" for c in self.coins)
+                _resp = _req.get("https://api.upbit.com/v1/ticker",
+                    params={"markets": _markets}, timeout=10)
+                _tickers = _resp.json() if _resp.status_code == 200 else []
+            except Exception:
+                _tickers = []
+
+            # 1차 필터: 상승 중(+1.5%) + 거래대금 30억 이상
+            pre_candidates = []
+            for t in _tickers:
+                coin = t['market'].replace('KRW-', '')
+                if coin in owned or coin in cooldown_coins or coin in maxed_coins:
                     continue
                 if hasattr(self, '_warning_coins') and coin in self._warning_coins:
                     continue
+                chg = t.get('signed_change_rate', 0)
+                trade_price = t.get('acc_trade_price_24h', 0)
+                if chg >= 0.015 and trade_price >= 3_000_000_000:
+                    pre_candidates.append((coin, chg, trade_price))
 
+            # 상승률 순 상위 25개만 상세 분석
+            pre_candidates.sort(key=lambda x: x[1], reverse=True)
+            scan_list = pre_candidates[:25]
+
+            if not scan_list:
+                return []
+
+            print(f"🚀 [SURGE] 1차 필터 {len(pre_candidates)}개 → 상위 {len(scan_list)}개 상세 분석")
+
+            for coin, ticker_chg, ticker_trade_price in scan_list:
                 ticker = f"KRW-{coin}"
                 try:
-                    # 5분봉 6개 (최근 30분)
+                    # ── 2단계: 5분봉 상세 분석 (점수제) ──
                     ohlcv_5m = pyupbit.get_ohlcv(ticker, interval="minute5", count=6)
                     if ohlcv_5m is None or len(ohlcv_5m) < 4:
                         continue
@@ -3763,90 +3815,130 @@ class TradingBotV3:
                     opens_5m = list(ohlcv_5m['open'])
                     highs_5m = list(ohlcv_5m['high'])
                     volumes_5m = list(ohlcv_5m['volume'])
+                    current_price = closes_5m[-1]
 
-                    # ── 감지 조건 (AND) ──
-
-                    # 1. 5분봉 2개 연속 양봉 (최근 10분 상승 흐름)
-                    if not (closes_5m[-1] > opens_5m[-1] and closes_5m[-2] > opens_5m[-2]):
-                        continue
-
-                    # 2. 10분 내 가격 변동 +3% 이상
+                    # 10분 가격 변동
                     if len(closes_5m) >= 3:
                         price_change_10m = (closes_5m[-1] - closes_5m[-3]) / closes_5m[-3]
                     else:
                         price_change_10m = (closes_5m[-1] - closes_5m[-2]) / closes_5m[-2]
-                    if price_change_10m < 0.02:  # v4.1: 3%→2% 완화
-                        continue
 
-                    # 3. 현재 거래량 >= 24h 평균의 2배 (v4.1: 3배→2배 완화)
+                    # 거래량 비율
                     avg_vol = np.mean(volumes_5m[:-2]) if len(volumes_5m) > 2 else np.mean(volumes_5m)
                     recent_vol = np.mean(volumes_5m[-2:])
-                    if avg_vol <= 0 or recent_vol < avg_vol * 2:
-                        continue
+                    vol_ratio = recent_vol / avg_vol if avg_vol > 0 else 0
 
-                    # 4. 시가총액(24h 거래대금) >= 50억원
-                    try:
-                        ticker_info = pyupbit.get_ohlcv(ticker, interval="day", count=1)
-                        if ticker_info is not None and len(ticker_info) > 0:
-                            day_volume_krw = float(ticker_info['volume'].iloc[-1]) * float(ticker_info['close'].iloc[-1])
-                            if day_volume_krw < 5_000_000_000:
-                                continue
-                        else:
-                            continue
-                    except:
-                        continue
-
-                    # ── 필터 (펌프앤덤프 제거) ──
-
-                    # 극단 변동 체크
-                    volatility = self.check_extreme_volatility(coin)
-                    if volatility in ("halt", "emergency_sell"):
-                        continue
-
-                    # 1분봉 최근 3개 중 음봉 2개 이상 → 이미 꺾이는 중
-                    try:
-                        ohlcv_1m = pyupbit.get_ohlcv(ticker, interval="minute1", count=3)
-                        if ohlcv_1m is not None and len(ohlcv_1m) >= 3:
-                            bearish_count = sum(1 for i in range(len(ohlcv_1m))
-                                                if ohlcv_1m['close'].iloc[i] < ohlcv_1m['open'].iloc[i])
-                            if bearish_count >= 2:
-                                continue
-                    except:
+                    # 필수 조건: 10분 +1.5% 이상
+                    if price_change_10m < 0.015:
+                        # 10분 급등이 아니면 → 초기 급등(1시간봉) 체크로 넘김
                         pass
+                    else:
+                        # ── 점수 산정 (10분 급등형) ──
+                        score = 0
 
-                    # 고점 대비 -2% 이상 하락한 코인 제외 (꼭대기 추격 방지)
-                    recent_high = max(highs_5m[-3:]) if len(highs_5m) >= 3 else max(highs_5m)
-                    current_price = closes_5m[-1]
-                    if recent_high > 0 and (current_price - recent_high) / recent_high < -0.02:
-                        continue
+                        # 5분봉 2연속 양봉: +2점
+                        if closes_5m[-1] > opens_5m[-1] and closes_5m[-2] > opens_5m[-2]:
+                            score += 2
 
-                    # ── 진입 타이밍: 눌림목 감지 ──
-                    # 5분봉 직전봉 고점 대비 현재가가 -0.5%~-2% 되돌림 구간
-                    prev_high = highs_5m[-2]
-                    pullback = (current_price - prev_high) / prev_high
+                        # 거래량 배율
+                        if vol_ratio >= 3:
+                            score += 5
+                        elif vol_ratio >= 2:
+                            score += 3
+                        elif vol_ratio >= 1.5:
+                            score += 1
 
-                    if -0.02 <= pullback <= -0.005:
-                        # 눌림목 구간 → 매수 적격
+                        # 10분 상승률
+                        if price_change_10m >= 0.05:
+                            score += 4
+                        elif price_change_10m >= 0.03:
+                            score += 3
+                        elif price_change_10m >= 0.02:
+                            score += 2
+
+                        # 눌림목 가산 (필수 아님)
+                        prev_high = highs_5m[-2]
+                        pullback = (current_price - prev_high) / prev_high
+                        if -0.02 <= pullback <= -0.005:
+                            score += 3
+
+                        # 점수 문턱: 5점 이상
+                        if score < 5:
+                            continue
+
+                        # ── 펌프앤덤프 필터 (기존 유지) ──
+                        volatility = self.check_extreme_volatility(coin)
+                        if volatility in ("halt", "emergency_sell"):
+                            continue
+
+                        # 1분봉 음봉 2/3 → 이미 꺾임
+                        try:
+                            ohlcv_1m = pyupbit.get_ohlcv(ticker, interval="minute1", count=3)
+                            if ohlcv_1m is not None and len(ohlcv_1m) >= 3:
+                                bearish_count = sum(1 for i in range(len(ohlcv_1m))
+                                                    if ohlcv_1m['close'].iloc[i] < ohlcv_1m['open'].iloc[i])
+                                if bearish_count >= 2:
+                                    continue
+                        except:
+                            pass
+
+                        # 고점 대비 -2% 이상 하락 → 추격 방지
+                        recent_high = max(highs_5m[-3:]) if len(highs_5m) >= 3 else max(highs_5m)
+                        if recent_high > 0 and (current_price - recent_high) / recent_high < -0.02:
+                            continue
+
                         candidates.append({
                             'coin': coin,
                             'price': current_price,
                             'change_10m': price_change_10m,
-                            'vol_ratio': recent_vol / avg_vol if avg_vol > 0 else 0,
+                            'vol_ratio': vol_ratio,
                             'pullback': pullback,
+                            'score': score,
+                            'surge_type': 'rapid',
                         })
-                        print(f"🚀 [SURGE 감지] {coin}: 10분 +{price_change_10m*100:.1f}%, 거래량 {recent_vol/avg_vol:.1f}배, 눌림 {pullback*100:.2f}%")
-                    # else: 되돌림 없이 수직 상승 중 → 1사이클 대기 (자동으로 다음 호출에서 재감지)
+                        print(f"🚀 [SURGE 감지] {coin}: 10분 +{price_change_10m*100:.1f}%, 거래량 {vol_ratio:.1f}배, 점수 {score}점")
+                        continue  # 10분 급등으로 이미 추가됨, 초기 급등 체크 불필요
+
+                    # ── 3단계: 초기 급등 감지 (1시간봉 기준, 서서히 오르는 코인) ──
+                    try:
+                        ohlcv_1h = pyupbit.get_ohlcv(ticker, interval="minute60", count=4)
+                        if ohlcv_1h is not None and len(ohlcv_1h) >= 2:
+                            change_1h = (ohlcv_1h['close'].iloc[-1] - ohlcv_1h['close'].iloc[-2]) / ohlcv_1h['close'].iloc[-2]
+                            vol_1h = ohlcv_1h['volume'].iloc[-1]
+                            avg_vol_1h = ohlcv_1h['volume'].iloc[:-1].mean() if len(ohlcv_1h) > 1 else vol_1h
+
+                            # 1시간 +3% 이상 + 거래량 1.5배 + 아직 고점 근처
+                            if change_1h >= 0.03 and (avg_vol_1h <= 0 or vol_1h >= avg_vol_1h * 1.5):
+                                # 아직 고점 근처인지 (급등 초기 확인)
+                                if ohlcv_1h['close'].iloc[-1] >= ohlcv_1h['high'].iloc[-1] * 0.98:
+                                    # 펌프앤덤프 필터
+                                    volatility = self.check_extreme_volatility(coin)
+                                    if volatility in ("halt", "emergency_sell"):
+                                        continue
+
+                                    vol_1h_ratio = vol_1h / avg_vol_1h if avg_vol_1h > 0 else 1
+                                    candidates.append({
+                                        'coin': coin,
+                                        'price': current_price,
+                                        'change_10m': change_1h,
+                                        'vol_ratio': vol_1h_ratio,
+                                        'pullback': 0,
+                                        'score': 6,
+                                        'surge_type': 'early',
+                                    })
+                                    print(f"🚀 [SURGE 초기급등] {coin}: 1h +{change_1h*100:.1f}%, 거래량 {vol_1h_ratio:.1f}배, 고점 근처")
+                    except:
+                        pass
 
                 except Exception:
                     continue
 
                 time.sleep(0.1)  # API 호출 간격
 
-            # 최대 1개 반환 (가장 좋은 조건의 코인)
+            # 점수 높은 순으로 정렬, 최대 2개 반환
             if candidates:
-                # 거래량 비율이 가장 높은 코인 우선
-                candidates.sort(key=lambda x: x['vol_ratio'], reverse=True)
-                return [candidates[0]]
+                candidates.sort(key=lambda x: x['score'], reverse=True)
+                return candidates[:2]
             return []
 
         except Exception as e:
@@ -3875,16 +3967,22 @@ class TradingBotV3:
 
                 sell_reason = None
 
-                # 1. -1.5% 즉시 손절 (방어적)
-                if profit_rate <= -0.015:
-                    sell_reason = f"손절 {profit_rate*100:+.2f}% ≤ -1.5%"
+                # v5.0: 초기 급등 타입은 타임아웃 확대
+                is_early = pos.get('surge_type') == 'early'
+                timeout_loss = 30 if is_early else 10     # 손실 타임아웃
+                timeout_flat = 45 if is_early else 15     # 횡보 타임아웃
 
-                # 2. 10분 경과 + 수익 0% 미만 → 타임아웃 손절
-                elif elapsed_min >= 10 and profit_rate < 0:
+                # 1. 즉시 손절 (v5.1: rapid -1.0%, early -2.0%)
+                stop_limit = -0.02 if is_early else -0.01
+                if profit_rate <= stop_limit:
+                    sell_reason = f"손절 {profit_rate*100:+.2f}% ≤ {stop_limit*100:.1f}%"
+
+                # 2. 타임아웃 손절
+                elif elapsed_min >= timeout_loss and profit_rate < 0:
                     sell_reason = f"타임아웃 손절 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
 
-                # 3. 15분 경과 + 수익 +0.5% 미만 → 횡보 정리
-                elif elapsed_min >= 15 and profit_rate < 0.005:
+                # 3. 횡보 정리
+                elif elapsed_min >= timeout_flat and profit_rate < 0.005:
                     sell_reason = f"횡보 정리 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
 
                 # 4. +2% 이상 트레일링 스탑 활성화 (고점 대비 -0.7% 하락 시 매도)
@@ -3992,10 +4090,13 @@ class TradingBotV3:
                 'quantity': quantity,
                 'timestamp': now,
                 'peak_rate': 0,
+                'surge_type': target.get('surge_type', 'rapid'),
             }
             self._last_surge_entry = now
+            # v5.1: 코인별 surge 진입 횟수 추적
+            self._surge_coin_count[coin] = self._surge_coin_count.get(coin, 0) + 1
             self._db_log_trade(coin, "buy", price, quantity, surge_budget, batch='surge_trade')
-            self._notify(f"[SURGE BUY] {coin} | {surge_budget:,}원 @ {price:,.0f} | 10분 +{target['change_10m']*100:.1f}%")
+            self._notify(f"[SURGE BUY] {coin} | {surge_budget:,}원 @ {price:,.0f} | 10분 +{target['change_10m']*100:.1f}% ({self._surge_coin_count[coin]}/2회)")
 
         except Exception as e:
             print(f"⚠️ [SURGE] 오류: {e}")
@@ -4026,6 +4127,8 @@ class TradingBotV3:
                 self.trades.append({'coin': coin, 'batch': 'idle_trade', 'buy_price': pos['buy_price'],
                                     'sell_price': price, 'profit_rate': profit_rate * 100,
                                     'timestamp': datetime.now().isoformat()})
+                self._db_log_trade(coin, "sell", price, pos['quantity'], pos['amount'] + profit,
+                                   profit=profit, profit_rate=profit_rate * 100, batch='idle_trade')
                 self._notify(f"[IDLE→MOM] {coin} {tag} {profit_rate*100:+.2f}% ({profit:+,}원)")
                 del self._scalp_positions[coin]
                 self._save_positions()
