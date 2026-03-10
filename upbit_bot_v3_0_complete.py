@@ -4013,6 +4013,16 @@ class TradingBotV3:
 
                 # ── 눌림목 진입 실행 ──
                 if watch.get('entry_ready'):
+                    # v5.4: 모멘텀 0 이하면 진입 차단
+                    try:
+                        _m_score, _m_detail = self.calculate_momentum(coin)
+                    except:
+                        _m_score = 0
+                    if _m_score <= 0:
+                        print(f"🚀 [SURGE 차단] {coin} 모멘텀 {_m_score}점 → 진입 포기")
+                        del self._surge_watchlist[coin]
+                        continue
+
                     entry_price = watch['entry_price']
                     available = self.current_balance
                     surge_budget = min(1500000, int(available * 0.15))
@@ -4082,31 +4092,33 @@ class TradingBotV3:
                 timeout_loss = 30 if is_early else 10     # 손실 타임아웃
                 timeout_flat = 45 if is_early else 15     # 횡보 타임아웃
 
-                # 1. 즉시 손절 (v5.3: 거래량 유지 시 유예, 절대 한도 -2.5%)
-                stop_limit = -0.02 if is_early else -0.01
-                if profit_rate <= -0.025:
-                    # 절대 손절선: -2.5% 이하는 거래량 무관 즉시 손절
+                # 1. v5.4: -2% 절대 손절 (거래량 무관)
+                if profit_rate <= -0.02:
                     sell_reason = f"절대 손절 {profit_rate*100:+.2f}%"
-                elif profit_rate <= stop_limit:
-                    # v5.3: 거래량이 살아있으면 손절 유예 (한 번만)
-                    vol_alive = False
-                    if not pos.get('_stop_deferred'):
-                        try:
-                            _ohlcv_1m = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute1", count=5)
-                            if _ohlcv_1m is not None and len(_ohlcv_1m) >= 3:
-                                recent_vol = _ohlcv_1m['volume'].iloc[-1]
-                                avg_vol = _ohlcv_1m['volume'].iloc[:-1].mean()
-                                if avg_vol > 0 and recent_vol >= avg_vol * 1.5:
-                                    vol_alive = True
-                        except:
-                            pass
-                    if vol_alive:
-                        pos['_stop_deferred'] = True
-                        print(f"  🚀 [SURGE] {coin} 손절 유예 — 거래량 활발 ({profit_rate*100:+.2f}%)")
-                    else:
-                        sell_reason = f"손절 {profit_rate*100:+.2f}% ≤ {stop_limit*100:.1f}%"
 
-                # v5.3: 5분 퀵엑싯 — 5분 경과 후 손실 중이면 즉시 정리 (rapid만)
+                # 2. v5.4: 스마트 손절 — 손절 구간(-1%~-2%)에서 거래량 보고 최적 타이밍
+                elif profit_rate <= -0.01:
+                    vol_alive = False
+                    try:
+                        _ohlcv_1m = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute1", count=5)
+                        if _ohlcv_1m is not None and len(_ohlcv_1m) >= 3:
+                            recent_vol = _ohlcv_1m['volume'].iloc[-1]
+                            avg_vol = _ohlcv_1m['volume'].iloc[:-1].mean()
+                            # 1분봉 양봉 여부 (반등 중인지)
+                            last_bullish = _ohlcv_1m['close'].iloc[-1] > _ohlcv_1m['open'].iloc[-1]
+                            if avg_vol > 0 and recent_vol >= avg_vol * 1.5 and last_bullish:
+                                vol_alive = True
+                    except:
+                        pass
+                    defer_count = pos.get('_stop_defer_count', 0)
+                    if vol_alive and defer_count < 3:
+                        # 거래량 활발 + 양봉 → 반등 대기 (최대 3회 = ~90초)
+                        pos['_stop_defer_count'] = defer_count + 1
+                        print(f"  🚀 [SURGE] {coin} 스마트 손절 대기 {defer_count+1}/3 — 거래량↑ 양봉 ({profit_rate*100:+.2f}%)")
+                    else:
+                        sell_reason = f"손절 {profit_rate*100:+.2f}% (유예 {defer_count}회)"
+
+                # 3. v5.3: 5분 퀵엑싯 — 5분 경과 후 손실 중이면 즉시 정리 (rapid만)
                 elif elapsed_min >= 5 and profit_rate < 0 and not is_early:
                     sell_reason = f"5분 퀵엑싯 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
 
