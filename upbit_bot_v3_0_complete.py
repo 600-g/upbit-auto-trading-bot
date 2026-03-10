@@ -4715,6 +4715,11 @@ if __name__ == "__main__":
                     us_state, _ = bot.check_us_market()
                     last_market_check = now
 
+                # v5.2: surge 포지션 있으면 30초마다 긴급 모니터링 (급락 대응)
+                if bot._surge_positions:
+                    with bot._trade_lock:
+                        bot.surge_trade()
+
                 # 거래 사이클 (3분마다)
                 if now - last_trade_cycle >= TRADE_INTERVAL:
                     cycle += 1
@@ -4734,7 +4739,7 @@ if __name__ == "__main__":
                     bot.idle_fund_trade()
                     bot.surge_trade()
 
-                time.sleep(60)  # 1분 간격으로 루프
+                time.sleep(30)  # v5.2: 30초 간격 (surge 급락 대응)
 
             except KeyboardInterrupt:
                 print("\n\n🛑 모니터링 종료")
