@@ -148,6 +148,7 @@ class TradingBotV3:
         self._surge_max = 1            # 동시 서지 포지션 최대 1개
         self._last_surge_entry = 0     # 마지막 서지 진입 시각
         self._surge_coin_count = {}    # v5.1: 코인별 surge 진입 횟수 (같은 코인 2회 제한)
+        self._surge_watchlist = {}     # v5.3: 눌림목 대기열 {coin: {detected_price, peak_price, timestamp, surge_type, ...}}
 
         # v4.3: 과매매 방지
         self._daily_coin_buys = {}     # {coin: count} 코인별 일일 매수 횟수
@@ -274,6 +275,7 @@ class TradingBotV3:
                     'positions': self.positions,
                     'scalp': self._scalp_positions,
                     'surge': self._surge_positions,
+                    'surge_watchlist': self._surge_watchlist,  # v5.3
                 }
                 positions_json = json.dumps(all_data, ensure_ascii=False)
                 now = datetime.now().isoformat()
@@ -310,10 +312,12 @@ class TradingBotV3:
                     saved_positions = raw_data['positions']
                     self._scalp_positions = raw_data.get('scalp', {})
                     self._surge_positions = raw_data.get('surge', {})
+                    self._surge_watchlist = raw_data.get('surge_watchlist', {})  # v5.3
                 else:
                     saved_positions = raw_data  # 구형식 하위호환
                     self._scalp_positions = {}
                     self._surge_positions = {}
+                    self._surge_watchlist = {}  # v5.3
 
                 if saved_positions:
                     self.positions = saved_positions
@@ -327,6 +331,8 @@ class TradingBotV3:
                     print(f"   + 스캘프 포지션 복원: {list(self._scalp_positions.keys())}")
                 if self._surge_positions:
                     print(f"   + 서지 포지션 복원: {list(self._surge_positions.keys())}")
+                if self._surge_watchlist:
+                    print(f"   + 서지 워치리스트 복원: {list(self._surge_watchlist.keys())}")
             else:
                 print("✅ 이전 포지션 기록 없음 (신규 시작)")
         except Exception as e:
@@ -3783,7 +3789,7 @@ class TradingBotV3:
     def _detect_surge_coins(self):
         """v5.0: 전체 코인 급등 탐지 — ticker API 1차 필터 + 점수제 + 초기 급등 감지"""
         try:
-            owned = set(self.positions.keys()) | set(self._scalp_positions.keys()) | set(self._surge_positions.keys())
+            owned = set(self.positions.keys()) | set(self._scalp_positions.keys()) | set(self._surge_positions.keys()) | set(self._surge_watchlist.keys())
             cooldown_coins = set(self._sell_cooldown.keys())
             # v5.1: 같은 코인 2회 초과 진입 차단
             maxed_coins = {c for c, n in self._surge_coin_count.items() if n >= 2}
@@ -3964,9 +3970,95 @@ class TradingBotV3:
             return []
 
     def surge_trade(self):
-        """급등 감지 추격 매매 — 1분마다 호출, 시장 상태 무관"""
+        """v5.3: 급등 감지 추격 매매 — 눌림목 진입 + 미니 트레일링 + 5분 퀵엑싯"""
         try:
             now = time.time()
+
+            # ── v5.3: 눌림목 워치리스트 모니터링 ──
+            for coin in list(self._surge_watchlist.keys()):
+                watch = self._surge_watchlist[coin]
+                price = self.get_price(coin)
+                if not price:
+                    continue
+                # 고점 갱신
+                if price > watch['peak_price']:
+                    watch['peak_price'] = price
+                elapsed = now - watch['timestamp']
+                drop_from_peak = (price - watch['peak_price']) / watch['peak_price']
+
+                # 눌림목 진입 조건: 고점 대비 -1% ~ -2.5% 하락
+                if -0.025 <= drop_from_peak <= -0.01:
+                    print(f"🚀 [SURGE 눌림목] {coin} 진입! 고점 {watch['peak_price']:,.0f} → 현재 {price:,.0f} ({drop_from_peak*100:+.1f}%)")
+                    watch['entry_ready'] = True
+                    watch['entry_price'] = price
+                # -2.5% 이상 급락 → 너무 많이 빠짐, 포기
+                elif drop_from_peak < -0.025:
+                    print(f"🚀 [SURGE 워치] {coin} 급락 {drop_from_peak*100:+.1f}% → 포기")
+                    del self._surge_watchlist[coin]
+                    continue
+                # 3분 타임아웃: 눌림 안 오면 현재가로 진입 (아직 상승 중이면)
+                elif elapsed >= 180:
+                    chg_from_detect = (price - watch['detected_price']) / watch['detected_price']
+                    if chg_from_detect >= 0.005:  # 감지 시점보다 +0.5% 이상이면 진입
+                        print(f"🚀 [SURGE 워치] {coin} 3분 대기 → 눌림 미발생, 현재가 진입 ({chg_from_detect*100:+.1f}%)")
+                        watch['entry_ready'] = True
+                        watch['entry_price'] = price
+                    else:
+                        print(f"🚀 [SURGE 워치] {coin} 3분 타임아웃 → 상승력 부족, 포기")
+                        del self._surge_watchlist[coin]
+                        continue
+                else:
+                    print(f"  🚀 [SURGE 워치] {coin}: 고점 대비 {drop_from_peak*100:+.1f}% | 대기 {elapsed:.0f}초")
+                    continue
+
+                # ── 눌림목 진입 실행 ──
+                if watch.get('entry_ready'):
+                    entry_price = watch['entry_price']
+                    available = self.current_balance
+                    surge_budget = min(1500000, int(available * 0.15))
+                    if surge_budget < 10000:
+                        del self._surge_watchlist[coin]
+                        continue
+                    if len(self._surge_positions) >= self._surge_max:
+                        del self._surge_watchlist[coin]
+                        continue
+
+                    if self.mode == "real" and self.upbit:
+                        result = self.upbit.buy_market_order(f"KRW-{coin}", surge_budget)
+                        if result is None or (isinstance(result, dict) and 'error' in result):
+                            print(f"❌ 서지 {coin} 매수 실패")
+                            del self._surge_watchlist[coin]
+                            continue
+                        time.sleep(2)
+                        self.current_balance = self._get_krw_balance()
+                        real_qty = float(self.upbit.get_balance(coin) or 0)
+                        prev_qty = 0
+                        if coin in self.positions:
+                            prev_qty += sum(p['quantity'] for p in self.positions[coin].values())
+                        if coin in self._scalp_positions:
+                            prev_qty += self._scalp_positions[coin].get('quantity', 0)
+                        actual_surge_qty = real_qty - prev_qty
+                        quantity = actual_surge_qty if actual_surge_qty > 0 else surge_budget / entry_price * 0.9995
+                    else:
+                        self.current_balance -= surge_budget
+                        quantity = surge_budget / entry_price
+
+                    self._surge_positions[coin] = {
+                        'buy_price': entry_price,
+                        'amount': surge_budget,
+                        'quantity': quantity,
+                        'timestamp': now,
+                        'peak_rate': 0,
+                        'surge_type': watch.get('surge_type', 'rapid'),
+                    }
+                    self._last_surge_entry = now
+                    self._surge_coin_count[coin] = self._surge_coin_count.get(coin, 0) + 1
+                    discount = (watch['detected_price'] - entry_price) / watch['detected_price'] * 100
+                    self._db_log_trade(coin, "buy", entry_price, quantity, surge_budget, batch='surge_trade')
+                    self._notify(f"[SURGE BUY 눌림목] {coin} | {surge_budget:,}원 @ {entry_price:,.0f} | 할인 {discount:.1f}% ({self._surge_coin_count[coin]}/2회)")
+                    print(f"🚀 [SURGE 눌림목 매수] {coin} | {surge_budget:,}원 @ {entry_price:,.0f} | 감지가 대비 -{discount:.1f}%")
+                    del self._surge_watchlist[coin]
+                    self._save_positions()
 
             # ── 서지 포지션 모니터링 ──
             for coin in list(self._surge_positions.keys()):
@@ -3990,10 +4082,33 @@ class TradingBotV3:
                 timeout_loss = 30 if is_early else 10     # 손실 타임아웃
                 timeout_flat = 45 if is_early else 15     # 횡보 타임아웃
 
-                # 1. 즉시 손절 (v5.1: rapid -1.0%, early -2.0%)
+                # 1. 즉시 손절 (v5.3: 거래량 유지 시 유예, 절대 한도 -2.5%)
                 stop_limit = -0.02 if is_early else -0.01
-                if profit_rate <= stop_limit:
-                    sell_reason = f"손절 {profit_rate*100:+.2f}% ≤ {stop_limit*100:.1f}%"
+                if profit_rate <= -0.025:
+                    # 절대 손절선: -2.5% 이하는 거래량 무관 즉시 손절
+                    sell_reason = f"절대 손절 {profit_rate*100:+.2f}%"
+                elif profit_rate <= stop_limit:
+                    # v5.3: 거래량이 살아있으면 손절 유예 (한 번만)
+                    vol_alive = False
+                    if not pos.get('_stop_deferred'):
+                        try:
+                            _ohlcv_1m = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute1", count=5)
+                            if _ohlcv_1m is not None and len(_ohlcv_1m) >= 3:
+                                recent_vol = _ohlcv_1m['volume'].iloc[-1]
+                                avg_vol = _ohlcv_1m['volume'].iloc[:-1].mean()
+                                if avg_vol > 0 and recent_vol >= avg_vol * 1.5:
+                                    vol_alive = True
+                        except:
+                            pass
+                    if vol_alive:
+                        pos['_stop_deferred'] = True
+                        print(f"  🚀 [SURGE] {coin} 손절 유예 — 거래량 활발 ({profit_rate*100:+.2f}%)")
+                    else:
+                        sell_reason = f"손절 {profit_rate*100:+.2f}% ≤ {stop_limit*100:.1f}%"
+
+                # v5.3: 5분 퀵엑싯 — 5분 경과 후 손실 중이면 즉시 정리 (rapid만)
+                elif elapsed_min >= 5 and profit_rate < 0 and not is_early:
+                    sell_reason = f"5분 퀵엑싯 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
 
                 # 2. 타임아웃 손절
                 elif elapsed_min >= timeout_loss and profit_rate < 0:
@@ -4002,6 +4117,10 @@ class TradingBotV3:
                 # 3. 횡보 정리
                 elif elapsed_min >= timeout_flat and profit_rate < 0.005:
                     sell_reason = f"횡보 정리 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
+
+                # v5.3: 미니 트레일링 — +0.5%~2% 구간에서 고점 대비 -0.4% 하락 시 익절
+                elif 0.005 <= peak_rate < 0.02 and (peak_rate - profit_rate) >= 0.004:
+                    sell_reason = f"미니 트레일링 익절 (고점 {peak_rate*100:+.2f}% → {profit_rate*100:+.2f}%)"
 
                 # 4. +2% 이상 트레일링 스탑 활성화 (고점 대비 -0.7% 하락 시 매도)
                 elif peak_rate >= 0.02 and (peak_rate - profit_rate) >= 0.007:
@@ -4080,41 +4199,21 @@ class TradingBotV3:
             coin = target['coin']
             price = target['price']
 
-            print(f"🚀 [SURGE 진입] {coin} | 10분 +{target['change_10m']*100:.1f}% | 거래량 {target['vol_ratio']:.1f}배 | 눌림 {target['pullback']*100:.2f}% | {surge_budget:,}원")
+            # v5.3: 즉시 매수 대신 눌림목 워치리스트에 추가
+            if coin in self._surge_watchlist:
+                return  # 이미 워치 중
 
-            if self.mode == "real" and self.upbit:
-                result = self.upbit.buy_market_order(f"KRW-{coin}", surge_budget)
-                if result is None or (isinstance(result, dict) and 'error' in result):
-                    print(f"❌ 서지 {coin} 매수 실패")
-                    return
-                time.sleep(2)
-                self.current_balance = self._get_krw_balance()
-                # v4.2: 기존 보유분 차감하여 서지 매수분만 기록
-                real_qty = float(self.upbit.get_balance(coin) or 0)
-                prev_qty = 0
-                if coin in self.positions:
-                    prev_qty += sum(p['quantity'] for p in self.positions[coin].values())
-                if coin in self._scalp_positions:
-                    prev_qty += self._scalp_positions[coin].get('quantity', 0)
-                actual_surge_qty = real_qty - prev_qty
-                quantity = actual_surge_qty if actual_surge_qty > 0 else surge_budget / price * 0.9995
-            else:
-                self.current_balance -= surge_budget
-                quantity = surge_budget / price
-
-            self._surge_positions[coin] = {
-                'buy_price': price,
-                'amount': surge_budget,
-                'quantity': quantity,
+            self._surge_watchlist[coin] = {
+                'detected_price': price,
+                'peak_price': price,
                 'timestamp': now,
-                'peak_rate': 0,
                 'surge_type': target.get('surge_type', 'rapid'),
+                'change_10m': target['change_10m'],
+                'vol_ratio': target['vol_ratio'],
             }
             self._last_surge_entry = now
-            # v5.1: 코인별 surge 진입 횟수 추적
-            self._surge_coin_count[coin] = self._surge_coin_count.get(coin, 0) + 1
-            self._db_log_trade(coin, "buy", price, quantity, surge_budget, batch='surge_trade')
-            self._notify(f"[SURGE BUY] {coin} | {surge_budget:,}원 @ {price:,.0f} | 10분 +{target['change_10m']*100:.1f}% ({self._surge_coin_count[coin]}/2회)")
+            print(f"🚀 [SURGE 워치] {coin} 눌림목 대기 등록 | {price:,.0f}원 | 10분 +{target['change_10m']*100:.1f}% | 거래량 {target['vol_ratio']:.1f}배")
+            self._notify(f"[SURGE WATCH] {coin} 눌림목 대기 | {price:,.0f}원 | +{target['change_10m']*100:.1f}%")
 
         except Exception as e:
             print(f"⚠️ [SURGE] 오류: {e}")
@@ -4715,8 +4814,8 @@ if __name__ == "__main__":
                     us_state, _ = bot.check_us_market()
                     last_market_check = now
 
-                # v5.2: surge 포지션 있으면 30초마다 긴급 모니터링 (급락 대응)
-                if bot._surge_positions:
+                # v5.3: surge 포지션 또는 워치리스트 있으면 30초마다 긴급 모니터링
+                if bot._surge_positions or bot._surge_watchlist:
                     with bot._trade_lock:
                         bot.surge_trade()
 
