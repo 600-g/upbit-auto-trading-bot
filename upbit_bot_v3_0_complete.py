@@ -158,7 +158,7 @@ class TradingBotV3:
 
         # v4.4: 자동 학습 시스템 (Auto-Tune)
         self._autotune_enabled = True
-        self._autotune_interval = 10800  # 3시간 (초) — 더 빠른 피드백 루프
+        self._autotune_interval = 3600   # v5.4: 1시간 간격 분석
         self._last_autotune = 0
         self._autotune_rules = []        # 현재 활성 규칙 캐시
         self._autotune_blacklist = set() # 블랙리스트 캐시 (빠른 조회용)
@@ -2142,10 +2142,10 @@ class TradingBotV3:
         return 0
 
     def _autotune_analyze(self):
-        """최근 3시간 거래 데이터를 분석하여 자동 조정 규칙 생성 (v4.5: 6h→3h 빠른 피드백)"""
+        """v5.4: 최근 6시간 거래 분석 → 자동 조정"""
         rules = []
         now = datetime.now()
-        six_hours_ago = (now - __import__('datetime').timedelta(hours=3)).isoformat()
+        six_hours_ago = (now - __import__('datetime').timedelta(hours=6)).isoformat()
 
         try:
             with self._db_lock:
@@ -3271,13 +3271,13 @@ class TradingBotV3:
                 if buy_amount < 5000:
                     print(f" 💸 매수금액 부족 ({buy_amount:,}원) → 패스")
                     continue
-                # v5.2: 저항선이 현재가 +1% 미만이면 진입 차단 (잔챙이 익절 방지)
+                # v5.4: 저항선이 현재가 +2% 미만이면 진입 차단 (0원 즉시매도 근본 방지)
                 try:
                     _sr_check = self._calc_sr_levels(coin)
                     _cur_price = self.get_price(coin)
                     if _sr_check and _cur_price and _sr_check.get('nearest_resistance'):
                         _upside = (_sr_check['nearest_resistance'] - _cur_price) / _cur_price
-                        if _upside < 0.01:
+                        if _upside < 0.02:
                             print(f" ⚠️ 저항선 {_sr_check['nearest_resistance']:,.0f} 너무 가까움 (+{_upside*100:.2f}%) → 패스")
                             continue
                 except:
@@ -3295,20 +3295,7 @@ class TradingBotV3:
                     print(f"  ❌ {coin} 1차 매수 실패 → 다음 코인으로")
                     continue
 
-                # v3.2: 매수 직후 3초 대기 후 모멘텀 재확인 (급락 방어)
-                # v3.3: 개별 강세 코인은 모멘텀이 원래 낮으므로 재확인 스킵
-                if coin_is_strong:
-                    print(f"🔥 {coin} 개별 강세 코인 → 모멘텀 재확인 스킵")
-                time.sleep(3)
-                recheck_momentum = self.calculate_momentum(coin)
-                if not coin_is_strong and recheck_momentum < 30:
-                    print(f"⚠️ {coin} 매수 후 모멘텀 재확인: {recheck_momentum}점 < 30점 → 즉시 매도!")
-                    # 방금 매수한 배치 찾아서 즉시 매도
-                    if coin in self.positions:
-                        for bid in list(self.positions[coin].keys()):
-                            self.place_sell_order(coin, bid)
-                        self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': True, 'exit_price': price}
-                    continue
+                # v5.4: 매수 후 즉시매도 제거 (0원 거래 방지) — 매수 전 필터로 충분히 걸러냄
 
                 # 2차 매수는 5분 후 별도 처리 (저점 매입)
                 if coin not in self._pending_2nd_buy:
