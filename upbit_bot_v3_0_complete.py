@@ -4000,13 +4000,13 @@ class TradingBotV3:
 
                 # ── 눌림목 진입 실행 ──
                 if watch.get('entry_ready'):
-                    # v5.4: 모멘텀 0 이하면 진입 차단
+                    # v5.4: 모멘텀 음수면 진입 차단 (급등 자체가 모멘텀이므로 0점은 허용)
                     try:
                         _m_score, _m_detail = self.calculate_momentum(coin)
                     except:
                         _m_score = 0
-                    if _m_score <= 0:
-                        print(f"🚀 [SURGE 차단] {coin} 모멘텀 {_m_score}점 → 진입 포기")
+                    if _m_score < 0:
+                        print(f"🚀 [SURGE 차단] {coin} 모멘텀 {_m_score}점(음수) → 진입 포기")
                         del self._surge_watchlist[coin]
                         continue
 
