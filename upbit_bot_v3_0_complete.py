@@ -2947,12 +2947,11 @@ class TradingBotV3:
         if market_strength == "극약세":
             print("⚠️ 극약세 시장 → 개별 강세 코인만 선별 진입")
 
-        # v5.5: 심야(23~05시) 일반매매 차단 (데이터: 심야 일반 32% -49k)
-        # 06~08시는 허용 (일반매매 심야 중 가장 양호 + 아침 추세 형성)
+        # v5.5: 심야(23~05시) 모멘텀 기준 강화 (차단 아님, 확실한 것만 진입)
         _cur_hour = datetime.now().hour
         if _cur_hour >= 23 or _cur_hour < 6:
-            print(f"🌙 심야({_cur_hour:02d}시) → 일반 신규 매수 중단")
-            return
+            min_score = min(min_score + 8, 35)  # +8점 가산
+            print(f"🌙 심야({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
 
         # 코인 선택
         selected = self.select_coins()
@@ -4042,11 +4041,12 @@ class TradingBotV3:
                         'timestamp': now,
                         'peak_rate': 0,
                         'surge_type': watch.get('surge_type', 'rapid'),
+                        'momentum': _m_score,  # v5.5: 학습용 모멘텀 기록
                     }
                     self._last_surge_entry = now
                     self._surge_coin_count[coin] = self._surge_coin_count.get(coin, 0) + 1
                     discount = (watch['detected_price'] - entry_price) / watch['detected_price'] * 100
-                    self._db_log_trade(coin, "buy", entry_price, quantity, surge_budget, batch='surge_trade')
+                    self._db_log_trade(coin, "buy", entry_price, quantity, surge_budget, momentum=_m_score, batch='surge_trade')
                     self._notify(f"[SURGE BUY 눌림목] {coin} | {surge_budget:,}원 @ {entry_price:,.0f} | 할인 {discount:.1f}% ({self._surge_coin_count[coin]}/2회)")
                     print(f"🚀 [SURGE 눌림목 매수] {coin} | {surge_budget:,}원 @ {entry_price:,.0f} | 감지가 대비 -{discount:.1f}%")
                     del self._surge_watchlist[coin]
@@ -4157,7 +4157,8 @@ class TradingBotV3:
                                         'sell_price': price, 'profit_rate': profit_rate * 100,
                                         'timestamp': datetime.now().isoformat()})
                     self._db_log_trade(coin, "sell", price, pos['quantity'], pos['amount'] + pnl,
-                                       profit=pnl, profit_rate=profit_rate * 100, batch='surge_trade')
+                                       profit=pnl, profit_rate=profit_rate * 100,
+                                       momentum=pos.get('momentum', 0), batch='surge_trade')
                     self._notify(f"[SURGE {tag}] {coin} {sell_reason} | {pnl:+,}원")
                     del self._surge_positions[coin]
                     self._save_positions()
@@ -4168,11 +4169,7 @@ class TradingBotV3:
                 print(f"  🚀 [SURGE] {coin}: {profit_rate*100:+.2f}% | 고점 {peak_rate*100:+.2f}% | {elapsed_min:.0f}분")
 
             # ── 신규 진입 ──
-            # v5.5: 심야(00~08시) 급등 신규 진입 차단 (데이터: 승률 21% -98k)
-            # 23시는 허용 (SIGN +5% 등 큰 수익 가능, 야간 기준강화 적용)
-            _cur_hour = datetime.now().hour
-            if 0 <= _cur_hour < 9:
-                return
+            # v5.5: 급등 심야 기준 강화는 아래 야간 모드에서 처리 (점수 8+, 예산 절반)
 
             if len(self._surge_positions) >= self._surge_max:
                 return
