@@ -2947,10 +2947,11 @@ class TradingBotV3:
         if market_strength == "극약세":
             print("⚠️ 극약세 시장 → 개별 강세 코인만 선별 진입")
 
-        # v5.5: 심야(23~08시) 신규 매수 차단 (데이터: 38건 승률 26% -146k)
+        # v5.5: 심야(23~05시) 일반매매 차단 (데이터: 심야 일반 32% -49k)
+        # 06~08시는 허용 (일반매매 심야 중 가장 양호 + 아침 추세 형성)
         _cur_hour = datetime.now().hour
-        if _cur_hour >= 23 or _cur_hour < 9:
-            print(f"🌙 심야 시간({_cur_hour:02d}시) → 신규 매수 중단, 보유 포지션만 모니터링")
+        if _cur_hour >= 23 or _cur_hour < 6:
+            print(f"🌙 심야({_cur_hour:02d}시) → 일반 신규 매수 중단")
             return
 
         # 코인 선택
@@ -4167,9 +4168,10 @@ class TradingBotV3:
                 print(f"  🚀 [SURGE] {coin}: {profit_rate*100:+.2f}% | 고점 {peak_rate*100:+.2f}% | {elapsed_min:.0f}분")
 
             # ── 신규 진입 ──
-            # v5.5: 심야(23~08시) 급등 신규 진입 차단
+            # v5.5: 심야(00~08시) 급등 신규 진입 차단 (데이터: 승률 21% -98k)
+            # 23시는 허용 (SIGN +5% 등 큰 수익 가능, 야간 기준강화 적용)
             _cur_hour = datetime.now().hour
-            if _cur_hour >= 23 or _cur_hour < 9:
+            if 0 <= _cur_hour < 9:
                 return
 
             if len(self._surge_positions) >= self._surge_max:
