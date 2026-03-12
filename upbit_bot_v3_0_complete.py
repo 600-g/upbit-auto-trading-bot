@@ -2947,6 +2947,12 @@ class TradingBotV3:
         if market_strength == "극약세":
             print("⚠️ 극약세 시장 → 개별 강세 코인만 선별 진입")
 
+        # v5.5: 심야(23~08시) 신규 매수 차단 (데이터: 38건 승률 26% -146k)
+        _cur_hour = datetime.now().hour
+        if _cur_hour >= 23 or _cur_hour < 9:
+            print(f"🌙 심야 시간({_cur_hour:02d}시) → 신규 매수 중단, 보유 포지션만 모니터링")
+            return
+
         # 코인 선택
         selected = self.select_coins()
         print(f"🎯 선택된 코인: {selected}\n")
@@ -4161,6 +4167,11 @@ class TradingBotV3:
                 print(f"  🚀 [SURGE] {coin}: {profit_rate*100:+.2f}% | 고점 {peak_rate*100:+.2f}% | {elapsed_min:.0f}분")
 
             # ── 신규 진입 ──
+            # v5.5: 심야(23~08시) 급등 신규 진입 차단
+            _cur_hour = datetime.now().hour
+            if _cur_hour >= 23 or _cur_hour < 9:
+                return
+
             if len(self._surge_positions) >= self._surge_max:
                 return
 
