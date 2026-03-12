@@ -4062,10 +4062,10 @@ class TradingBotV3:
 
                 sell_reason = None
 
-                # v5.0: 초기 급등 타입은 타임아웃 확대
+                # v5.5: 타임아웃 확대 (데이터: 15분+ 보유 승률 44%, 5~15분 12%)
                 is_early = pos.get('surge_type') == 'early'
-                timeout_loss = 30 if is_early else 10     # 손실 타임아웃
-                timeout_flat = 45 if is_early else 15     # 횡보 타임아웃
+                timeout_loss = 30 if is_early else 20     # 손실 타임아웃: 10→20분
+                timeout_flat = 45 if is_early else 30     # 횡보 타임아웃: 15→30분
 
                 # 1. v5.4: -2% 절대 손절 (거래량 무관)
                 if profit_rate <= -0.02:
@@ -4093,17 +4093,20 @@ class TradingBotV3:
                     else:
                         sell_reason = f"손절 {profit_rate*100:+.2f}% (유예 {defer_count}회)"
 
-                # 3. v5.3: 5분 퀵엑싯 — 5분 경과 후 손실 중이면 즉시 정리 (rapid만)
-                elif elapsed_min >= 5 and profit_rate < 0 and not is_early:
-                    sell_reason = f"5분 퀵엑싯 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
+                # v5.5: 5분 퀵엑싯 제거 (데이터: 5~15분 손절이 승률 최악 12%)
+                # 대신 -1% 이상 깊은 손실만 타임아웃 적용
 
-                # 2. 타임아웃 손절
-                elif elapsed_min >= timeout_loss and profit_rate < 0:
+                # 2. 타임아웃 손절 — 깊은 손실(-0.5%+)만 적용
+                elif elapsed_min >= timeout_loss and profit_rate < -0.005:
                     sell_reason = f"타임아웃 손절 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
 
-                # 3. 횡보 정리
-                elif elapsed_min >= timeout_flat and profit_rate < 0.005:
+                # 3. 횡보 정리 — 소손실(-0.5% 미만)은 더 기다림
+                elif elapsed_min >= timeout_flat and profit_rate < -0.005:
                     sell_reason = f"횡보 정리 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
+
+                # v5.5: 최종 타임아웃 — 40분 지나면 뭐든 정리
+                elif elapsed_min >= 40 and profit_rate < 0.003:
+                    sell_reason = f"최종 타임아웃 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
 
                 # v5.3: 미니 트레일링 — +0.5%~2% 구간에서 고점 대비 -0.4% 하락 시 익절
                 elif 0.005 <= peak_rate < 0.02 and (peak_rate - profit_rate) >= 0.004:
