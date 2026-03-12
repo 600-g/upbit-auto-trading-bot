@@ -2041,21 +2041,21 @@ class TradingBotV3:
 
             avg = np.mean(scores) if scores else 0
 
-            # v4.5: 기준 현실화 (기존은 점수 분포 대비 너무 높아 매매 불가)
-            # AutoTune이 threshold_adjust 규칙으로 동적 보정 가능
-            base_adjust = self._get_autotune_threshold_adjust()
+            # v5.4: 기준 현실화 — 극공포장에서 모멘텀 TOP 25점대인 현실 반영
+            # AutoTune threshold_adjust는 악순환 유발하므로 적용 안함
             if avg < -0.15:
-                return "극약세", 42 + base_adjust   # 폭락장: 확실한 것만
+                return "극약세", 30     # 폭락장: 30점 이상만
             elif avg < -0.10:
-                return "심약세", 38 + base_adjust   # 심약세: 엄선
+                return "심약세", 28     # 심약세: 28점
             elif avg < -0.05:
-                return "약세", 33 + base_adjust     # 약세: 신중하게
+                return "약세", 25       # 약세: 25점
             elif avg < 0.03:
-                return "보통", 30 + base_adjust     # 평시: 적극 진입
+                return "보통", 22       # 평시: 적극 진입
             else:
-                return "강세", 25 + base_adjust     # 강세: 공격적
-        except:
-            return "보통", 30
+                return "강세", 18       # 강세: 공격적
+        except Exception as _e:
+            print(f"⚠️ 시장 강도 체크 오류: {_e}")
+            return "보통", 22
     
     def _calculate_momentum_inner(self, coin):
         """종합 모멘텀 점수 내부 계산 (v3.2: 거품 보정)"""
@@ -2280,30 +2280,10 @@ class TradingBotV3:
         total_sells = len(sells)
         win_rate = (win_count / total_sells * 100) if total_sells > 0 else 50
 
-        # 승률 높으면 → 기준 낮춰서 더 적극 진입, 승률 낮으면 → 기준 올림
+        # v5.4: threshold_adjust 제거 — 기준 올리면 매매 안 됨 → 학습 데이터 부족 → 악순환
+        # 대신 승률이 낮으면 블랙리스트/쿨다운으로 대응 (위 분석 1, 5에서 처리)
         if total_sells >= 5:
-            if win_rate >= 65:
-                adjust = -3  # 승률 좋으니 기준 낮춤
-                reason = f'승률 {win_rate:.0f}% (≥65%) → 기준 -3점'
-            elif win_rate >= 50:
-                adjust = 0   # 적정
-                reason = None
-            elif win_rate >= 35:
-                adjust = 3   # 승률 부족 → 기준 올림
-                reason = f'승률 {win_rate:.0f}% (<50%) → 기준 +3점'
-            else:
-                adjust = 5   # 승률 나쁨 → 확실히 올림
-                reason = f'승률 {win_rate:.0f}% (<35%) → 기준 +5점'
-
-            if reason:
-                rules.append({
-                    'rule_type': 'threshold_adjust',
-                    'coin': None,
-                    'param_key': 'min_score_adjust',
-                    'param_value': adjust,
-                    'reason': reason
-                })
-                print(f"🤖 [AutoTune] 진입 기준 조정: {reason}")
+            print(f"🤖 [AutoTune] 승률: {win_rate:.0f}% ({win_count}/{total_sells}건)")
 
         # --- 분석 7: 승패 기반 모멘텀 가중치 자동 조정 (v4.5) ---
         # 매수 시 모멘텀 점수가 높았던 지표가 수익/손실과 상관관계 분석
@@ -2958,6 +2938,8 @@ class TradingBotV3:
         # 미국 시장 연동
         us_state, us_adjust = self.check_us_market()
         min_score = max(0, min(100, min_score + us_adjust))
+        # v5.4: 최소 기준 캡 — 어떤 상황에서도 30 이하로 유지
+        min_score = min(min_score, 30)
 
         print(f"📈 시장 상태: {market_strength} | 미국: {us_state} → 최소 신호: {min_score}점")
 
@@ -3219,8 +3201,10 @@ class TradingBotV3:
 
                     signal_count = len(signals)
 
-                    if signal_count < 2:
-                        print(f" ⚠️ 시그널 {signal_count}개({', '.join(signals) if signals else '없음'}) → 2개 이상 필요, 매수 보류")
+                    # v5.4: 모멘텀 30+ 시그널 1개 허용, 그 외 2개 필요
+                    min_signals = 1 if momentum >= 30 else 2
+                    if signal_count < min_signals:
+                        print(f" ⚠️ 시그널 {signal_count}개({', '.join(signals) if signals else '없음'}) → {min_signals}개 이상 필요, 매수 보류")
                         continue
                     print(f" ✅ 시그널 {signal_count}개({'+'.join(signals)})", end="")
 
