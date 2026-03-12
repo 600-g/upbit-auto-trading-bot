@@ -3997,6 +3997,10 @@ class TradingBotV3:
                     entry_price = watch['entry_price']
                     available = self.current_balance
                     surge_budget = min(1500000, int(available * 0.15))
+                    # v5.4: 야간 예산 절반
+                    _hour = datetime.now().hour
+                    if _hour >= 23 or _hour < 6:
+                        surge_budget = surge_budget // 2
                     if surge_budget < 10000:
                         del self._surge_watchlist[coin]
                         continue
@@ -4181,6 +4185,16 @@ class TradingBotV3:
             target = surge_coins[0]
             coin = target['coin']
             price = target['price']
+
+            # v5.4: 야간(23~06시) 급등 기준 강화 — 점수 8+ 필요, 예산 절반
+            _hour = datetime.now().hour
+            _is_night = (_hour >= 23 or _hour < 6)
+            if _is_night:
+                if target.get('score', 0) < 8:
+                    print(f"🚀 [SURGE] {coin} 야간 점수 부족 ({target.get('score',0)}점 < 8점) → 패스")
+                    return
+                surge_budget = surge_budget // 2
+                print(f"🌙 [SURGE] 야간 모드: 점수 {target.get('score',0)}점 ≥ 8 OK, 예산 절반 {surge_budget:,}원")
 
             # v5.3: 즉시 매수 대신 눌림목 워치리스트에 추가
             if coin in self._surge_watchlist:
