@@ -4836,6 +4836,22 @@ if __name__ == "__main__":
                     bot.idle_fund_trade()
                     bot.surge_trade()
 
+                # v5.6: 100사이클마다 메모리/상태 자가점검
+                if cycle > 0 and cycle % 100 == 0:
+                    import gc
+                    gc.collect()
+                    # DB 정합성 체크
+                    try:
+                        bot._save_positions()
+                        _mem = __import__('resource').getrusage(__import__('resource').RUSAGE_SELF).ru_maxrss
+                        _mem_mb = _mem / (1024 * 1024)  # macOS: bytes
+                        print(f"🔧 [자가점검] 사이클 #{cycle} | 메모리 {_mem_mb:.0f}MB | 포지션 {len(bot.positions)}개 | 서지 {len(bot._surge_positions)}개 | 잔고 {bot.current_balance:,.0f}원")
+                        if _mem_mb > 500:
+                            print(f"⚠️ 메모리 경고 {_mem_mb:.0f}MB > 500MB")
+                            bot._notify(f"[WARN] 메모리 {_mem_mb:.0f}MB 초과")
+                    except:
+                        pass
+
                 time.sleep(30)  # v5.2: 30초 간격 (surge 급락 대응)
 
             except KeyboardInterrupt:

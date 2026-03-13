@@ -29,14 +29,19 @@ tg_send() {
         -d "text=$1" > /dev/null 2>&1
 }
 
-# 로그 파일 크기 관리 (10MB 초과 시 로테이션)
-if [ -f "$LOG_FILE" ]; then
-    LOG_SIZE=$(stat -f%z "$LOG_FILE" 2>/dev/null || stat --format=%s "$LOG_FILE" 2>/dev/null || echo 0)
-    if [ "$LOG_SIZE" -gt 10485760 ]; then
-        mv "$LOG_FILE" "${LOG_FILE}.old"
-        log_msg "로그 로테이션 완료"
+# 로그 파일 크기 관리
+for _logfile in "$LOG_FILE" "$BOT_STDOUT"; do
+    if [ -f "$_logfile" ]; then
+        _SIZE=$(stat -f%z "$_logfile" 2>/dev/null || echo 0)
+        if [ "$_SIZE" -gt 10485760 ]; then
+            mv "$_logfile" "${_logfile}.old"
+            log_msg "로그 로테이션: $_logfile"
+        fi
     fi
-fi
+done
+
+# JSON 거래 로그 정리 (1일 이상 된 것 삭제)
+find "$LOG_DIR" -name "trading_log_*.json" -mtime +1 -delete 2>/dev/null
 
 start_bot() {
     cd "$BOT_DIR"
