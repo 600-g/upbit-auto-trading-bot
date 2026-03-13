@@ -4525,16 +4525,17 @@ class TradingBotV3:
                     self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': True, 'exit_price': price}
                     continue
 
-                # === 3.3b v4.3: 소액 손실 조기컷 — 3분봉 2연속 음봉 + 손실 중이면 빠르게 정리 ===
-                if -0.005 < profit_rate < 0 and minutes_held >= 6:
+                # === 3.3b v5.6: 소액 손실 조기컷 완화 — -0.3% 이상은 회복 기회 부여 ===
+                # 데이터: -0.3% 이내 26건 근소패배 → 더 기다리면 회복 가능
+                if -0.005 < profit_rate < -0.003 and minutes_held >= 10:
                     try:
                         ticker = f"KRW-{coin}"
                         ohlcv_3m = pyupbit.get_ohlcv(ticker, interval="minute3", count=3)
                         if ohlcv_3m is not None and len(ohlcv_3m) >= 3:
                             last_3 = ohlcv_3m.tail(3)
                             bearish_count = sum(1 for _, row in last_3.iterrows() if row['close'] < row['open'])
-                            if bearish_count >= 2:
-                                print(f"✂️ {coin} {batch_id} 소액 조기컷: {profit_rate*100:+.2f}% + 3분봉 {bearish_count}연속 음봉 → 추가 하락 방지")
+                            if bearish_count >= 3:  # v5.6: 2→3연속 음봉 (더 확실한 하락만)
+                                print(f"✂️ {coin} {batch_id} 소액 조기컷: {profit_rate*100:+.2f}% + 3분봉 {bearish_count}연속 음봉")
                                 self.place_sell_order(coin, batch_id)
                                 self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': True, 'exit_price': price}
                                 continue
@@ -4562,25 +4563,23 @@ class TradingBotV3:
                     if hasattr(self, '_mini_trail_peaks') and mini_trail_key in self._mini_trail_peaks:
                         del self._mini_trail_peaks[mini_trail_key]
 
-                # === 3.4 v4.2: 20분+ 한번도 수익 못 낸 포지션 조기 정리 ===
-                # WET 사례: 진입 후 56분간 한번도 +가 안 됐는데 모멘텀만 보고 유지 → 결국 -2% 손절
-                # 20분 넘게 한번도 수익 구간(+0.3%)에 못 갔고 현재 손실이면 빠르게 정리
-                if hours >= 0.33 and profit_rate < 0 and not uptrend:
-                    # peak_rate 가 없거나 +0.3% 미만이면 "한번도 수익 못 낸" 포지션
+                # === 3.4 v5.6: 30분+ 수익 미도달 정리 (20분→30분 완화) ===
+                # 데이터: 20~25분 근소패배 다수 → 30분까지 기다리면 회복 가능
+                # 추가 조건: 손실 -0.3% 이상이어야 정리 (근소손실은 유지)
+                if hours >= 0.5 and profit_rate < -0.003 and not uptrend:
                     peak = position.get('peak_rate', profit_rate)
                     if peak < 0.003:
-                        print(f"⏰ {coin} {batch_id} 20분+ 수익 미도달(고점 {peak*100:+.2f}%) + 현재 {profit_rate*100:+.2f}% → 조기 정리")
+                        print(f"⏰ {coin} {batch_id} 30분+ 수익 미도달(고점 {peak*100:+.2f}%) + 현재 {profit_rate*100:+.2f}% → 조기 정리")
                         self.place_sell_order(coin, batch_id)
-                        # v4.2: 조기 정리 → 매도가 저장, 모멘텀 좋으면 싸게 재진입 허용
                         self._sell_cooldown[coin] = {
                             'time': time.time(), 'stoploss': False,
                             'early_exit': True, 'exit_price': price
                         }
                         continue
 
-                # === 3.5 시간 기반 정리 (손실 중 + 모멘텀 저조일 때만) ===
-                # 0% 부근은 아직 기회 있음 → 마이너스 + 저모멘텀일 때만 정리
-                if hours >= 0.5 and profit_rate < -0.003 and momentum < 35 and not uptrend:
+                # === 3.5 v5.6: 시간 기반 정리 완화 (30분→40분, -0.3%→-0.5%) ===
+                # 근소 손실은 더 기다림
+                if hours >= 0.67 and profit_rate < -0.005 and momentum < 35 and not uptrend:
                     print(f"⏰ {coin} {batch_id} 30분+ 손실({profit_rate*100:+.2f}%) + 모멘텀 {momentum:.0f}점 → 정리")
                     self.place_sell_order(coin, batch_id)
                     self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False}
