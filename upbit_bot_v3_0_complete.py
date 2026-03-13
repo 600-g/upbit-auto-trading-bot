@@ -3235,17 +3235,12 @@ class TradingBotV3:
                     pass
 
             if momentum >= min_score or (coin_is_strong and momentum >= 30):
-                # v4.1: 고모멘텀(80+) 집중투자 — 자산의 70%까지, 분할매수 (안전장치: 상승추세+거래량)
+                # v5.6: 45+ 모멘텀 예산 축소 (데이터: 45+ 리스크/리워드 0.4:1 역전)
+                # 80+ 집중투자 비활성화, 45+ 예산 절반
                 is_concentrate = False
-                if momentum >= 80 and remaining_slots >= 1:
-                    vol_score = self.analyze_volume(coin)
-                    if self._is_uptrend(coin) and vol_score >= 50:
-                        coin_budget = min(int(available * 0.7), int(MAX_TRADING_BUDGET * 0.7))
-                        is_concentrate = True
-                        print(f" 🔥 집중투자({momentum}점, 거래량{vol_score}점)!", end="")
-                    else:
-                        coin_budget = min(per_coin_budget, available)
-                        print(f" ⚠️ 80점+이나 추세/거래량 미달 → 일반배분", end="")
+                if momentum >= 45:
+                    coin_budget = min(per_coin_budget // 2, available)
+                    print(f" ⚠️ 고모멘텀({momentum}점) 과열주의 → 예산 절반 {coin_budget:,}원", end="")
                 else:
                     coin_budget = min(per_coin_budget, available)
 
@@ -3289,28 +3284,14 @@ class TradingBotV3:
 
                 # 2차 매수는 5분 후 별도 처리 (저점 매입)
                 if coin not in self._pending_2nd_buy:
-                    if is_concentrate:
-                        # 집중투자: 2차 30% (3분 후) + 3차 30% (6분 후)
-                        second_amount = int(coin_budget * 0.3)
-                        third_amount = coin_budget - buy_amount - second_amount  # 나머지
-                        self._pending_2nd_buy[coin] = {
-                            'amount': second_amount,
-                            'time': time.time(),
-                            'created': time.time(),
-                            'wait': 180,  # 3분 대기 (일반 5분보다 빠르게)
-                            'mom_1st': momentum,
-                            'concentrate': True,
-                            'third_amount': third_amount,  # 3차 매수 금액
-                        }
-                        print(f"   📋 집중투자 분할: 1차 {buy_amount:,}원(즉시) → 2차 {second_amount:,}원(3분후) → 3차 {third_amount:,}원(6분후)")
-                    else:
-                        self._pending_2nd_buy[coin] = {
-                            'amount': buy_amount,
-                            'time': time.time(),
-                            'created': time.time(),
-                            'wait': 300,  # 5분 대기
-                            'mom_1st': momentum
-                        }
+                    # v5.6: 집중투자 제거, 모든 코인 동일하게 2분할
+                    self._pending_2nd_buy[coin] = {
+                        'amount': buy_amount,
+                        'time': time.time(),
+                        'created': time.time(),
+                        'wait': 300,  # 5분 대기
+                        'mom_1st': momentum
+                    }
             else:
                 print(" ❌ 패스")
 
@@ -3332,11 +3313,10 @@ class TradingBotV3:
             for coin, mom, coin_invested in position_momentums:
                 if available < 10000:
                     break
-                # v4.1: 80+ 모멘텀 집중투자 시 3배치 허용, 그 외 2배치
+                # v5.6: 모든 코인 2배치까지만 (집중투자 제거)
                 num_batches = len(self.positions.get(coin, {}))
-                max_batches = 3 if mom >= 80 else 2
-                if num_batches >= max_batches:
-                    print(f"  {coin} 이미 {num_batches}배치 보유 → 추가 매수 불가 (최대 {max_batches}배치)")
+                if num_batches >= 2:
+                    print(f"  {coin} 이미 {num_batches}배치 보유 → 추가 매수 불가 (최대 2배치)")
                     continue
                 if mom < add_buy_threshold:
                     print(f"  {coin} 모멘텀 {mom}점 < {add_buy_threshold}점 → 추가 매수 불가")
@@ -3344,11 +3324,8 @@ class TradingBotV3:
                 if not self._is_uptrend(coin):
                     print(f"  {coin} 모멘텀 {mom}점 but 상승추세 아님 → 추가 매수 보류")
                     continue
-                # v4.1: 80+ 모멘텀 코인당 최대 70%, 그 외 50%
-                if mom >= 80:
-                    max_per_coin = int(MAX_TRADING_BUDGET * 0.7)
-                else:
-                    max_per_coin = int(MAX_TRADING_BUDGET * 0.5)
+                # v5.6: 코인당 최대 50% (집중투자 제거)
+                max_per_coin = int(MAX_TRADING_BUDGET * 0.5)
                 if coin_invested >= max_per_coin:
                     print(f"  {coin} 이미 {coin_invested:,}원 투자 (한도 {max_per_coin:,}원) → 추가 매수 불가")
                     continue
@@ -3973,17 +3950,11 @@ class TradingBotV3:
                     print(f"🚀 [SURGE 워치] {coin} 급락 {drop_from_peak*100:+.1f}% → 포기")
                     del self._surge_watchlist[coin]
                     continue
-                # 3분 타임아웃: 눌림 안 오면 현재가로 진입 (아직 상승 중이면)
+                # v5.6: 3분 타임아웃 → 눌림 안 오면 포기 (추격매수 제거)
                 elif elapsed >= 180:
-                    chg_from_detect = (price - watch['detected_price']) / watch['detected_price']
-                    if chg_from_detect >= 0.005:  # 감지 시점보다 +0.5% 이상이면 진입
-                        print(f"🚀 [SURGE 워치] {coin} 3분 대기 → 눌림 미발생, 현재가 진입 ({chg_from_detect*100:+.1f}%)")
-                        watch['entry_ready'] = True
-                        watch['entry_price'] = price
-                    else:
-                        print(f"🚀 [SURGE 워치] {coin} 3분 타임아웃 → 상승력 부족, 포기")
-                        del self._surge_watchlist[coin]
-                        continue
+                    print(f"🚀 [SURGE 워치] {coin} 3분 대기 → 눌림 미발생, 포기 (추격매수 금지)")
+                    del self._surge_watchlist[coin]
+                    continue
                 else:
                     print(f"  🚀 [SURGE 워치] {coin}: 고점 대비 {drop_from_peak*100:+.1f}% | 대기 {elapsed:.0f}초")
                     continue
@@ -3999,6 +3970,18 @@ class TradingBotV3:
                         print(f"🚀 [SURGE 차단] {coin} 모멘텀 {_m_score}점(음수) → 진입 포기")
                         del self._surge_watchlist[coin]
                         continue
+
+                    # v5.6: 눌림목 진입 시 1분봉 양봉 확인 (반등 중인지 체크)
+                    try:
+                        _entry_1m = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute1", count=2)
+                        if _entry_1m is not None and len(_entry_1m) >= 2:
+                            _last_bullish = _entry_1m['close'].iloc[-1] > _entry_1m['open'].iloc[-1]
+                            if not _last_bullish:
+                                print(f"🚀 [SURGE 대기] {coin} 눌림목 도달했지만 1분봉 음봉 → 반등 대기")
+                                watch['entry_ready'] = False  # 다음 사이클에서 재확인
+                                continue
+                    except:
+                        pass
 
                     entry_price = watch['entry_price']
                     available = self.current_balance
@@ -4077,6 +4060,12 @@ class TradingBotV3:
                 # 1. v5.4: -2% 절대 손절 (거래량 무관)
                 if profit_rate <= -0.02:
                     sell_reason = f"절대 손절 {profit_rate*100:+.2f}%"
+
+                # v5.6: 최소 보유 3분 (데이터: 0~3분 매도 승률 32%, -55k 손실)
+                # -2% 절대 손절만 예외, 나머지는 3분 이상 보유
+                elif elapsed_min < 3:
+                    print(f"  🚀 [SURGE] {coin}: {profit_rate*100:+.2f}% | 최소보유 대기 ({elapsed_min:.1f}분/3분)")
+                    continue
 
                 # 2. v5.4: 스마트 손절 — 손절 구간(-1%~-2%)에서 거래량 보고 최적 타이밍
                 elif profit_rate <= -0.01:
