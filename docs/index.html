@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>🚀 업비트 봇 v1.0.4</title>
+<title>🚀 업비트 봇 v1.0.5</title>
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -29,9 +29,9 @@ body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMac
 .sec { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
 .sec h2 { font-size: 13px; color: #58a6ff; margin-bottom: 8px; cursor: pointer; }
 .sec h2::after { content: ' ▾'; font-size: 10px; }
-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-th { text-align: left; color: #484f58; font-weight: 500; padding: 4px 6px; border-bottom: 1px solid #30363d; }
-td { padding: 5px 6px; border-bottom: 1px solid #1c2028; }
+table { width: 100%; border-collapse: collapse; font-size: 11px; }
+th { text-align: left; color: #484f58; font-weight: 500; padding: 3px 4px; border-bottom: 1px solid #30363d; white-space: nowrap; }
+td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 .tg { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; font-weight: 600; }
 .tw { background: #3d1419; color: #f85149; }
 .tl { background: #1e2a4a; color: #3b82f6; }
@@ -64,7 +64,7 @@ td { padding: 5px 6px; border-bottom: 1px solid #1c2028; }
 </head>
 <body>
 <div class="hdr">
-  <h1><span class="dot" id="dot"></span>🚀 업비트 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.0.4</span></h1>
+  <h1><span class="dot" id="dot"></span>🚀 업비트 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.0.5</span></h1>
   <span class="tm" id="tm"></span>
 </div>
 <div id="app"><div class="loading">로딩 중...</div></div>
@@ -185,14 +185,15 @@ function render(d) {
   }
 
   // Recent trades
-  html += '<div class="sec"><h2>최근 거래</h2><table><tr><th>시간</th><th>코인</th><th>손익</th><th>배치</th></tr>';
+  const bnShort = {'batch_1':'1차','batch_2':'2차','batch_3':'3차','surge_trade':'급등'};
+  html += '<div class="sec"><h2>최근 거래</h2><table><tr><th>시간</th><th>코인</th><th>손익</th><th></th></tr>';
   d.recent.forEach(t => {
-    const tag = t.profit > 0 ? 'tw' : t.profit < 0 ? 'tl' : 'td';
+    const tm = t.time.length > 5 ? t.time.slice(-5) : t.time;
     const pft = ps(Math.round(t.profit));
     const pct = `${t.profit_rate>=0?'+':''}${t.profit_rate.toFixed(1)}%`;
-    html += `<tr><td>${t.time}</td><td>${t.coin}</td>
-      <td class="${pc(t.profit)}">${pft} (${pct})</td>
-      <td><span class="tg ${t.batch==='surge_trade'?'ts':'tb'}">${batchNames[t.batch] || t.batch}</span></td></tr>`;
+    html += `<tr><td>${tm}</td><td>${t.coin}</td>
+      <td class="${pc(t.profit)}">${pft}(${pct})</td>
+      <td><span class="tg ${t.batch==='surge_trade'?'ts':'tb'}">${bnShort[t.batch]||t.batch}</span></td></tr>`;
   });
   html += '</table></div>';
 
@@ -209,7 +210,7 @@ document.getElementById('ver').addEventListener('click', () => {
   v.textContent = '새로고침...';
   load().then(() => {
     v.textContent = '✓ 완료';
-    setTimeout(() => { v.textContent = 'v1.0.4'; v.style.color = '#484f58'; }, 1000);
+    setTimeout(() => { v.textContent = 'v1.0.5'; v.style.color = '#484f58'; }, 1000);
   });
 });
 </script>
