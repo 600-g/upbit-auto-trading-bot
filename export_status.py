@@ -210,7 +210,7 @@ def export():
         'surge_watchlist': surge_watchlist,
         'bot_running': bot_running,
         'market': market,
-        'version': '1.0.8',
+        'version': '1.0.9',
         'updated': datetime.now().strftime('%m/%d %H:%M:%S')
     }
 

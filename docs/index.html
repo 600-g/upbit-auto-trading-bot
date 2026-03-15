@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>🚀 업비트 봇 v1.0.8</title>
+<title>🚀 업비트 봇 v1.0.9</title>
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -77,7 +77,7 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 </head>
 <body>
 <div class="hdr">
-  <h1><span class="dot" id="dot"></span>🚀 업비트 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.0.8</span></h1>
+  <h1><span class="dot" id="dot"></span>🚀 업비트 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.0.9</span></h1>
   <span class="tm" id="tm"></span>
 </div>
 <div id="app"><div class="loading">로딩 중...</div></div>
@@ -175,14 +175,19 @@ function render(d) {
   if (mkeys.length > 0) {
     const maxM = Math.max(...mkeys.map(k => Math.abs(months[k].pnl)), 1);
     html += '<div class="sec"><h2>월별 손익</h2>';
-    mkeys.forEach(k => {
+    mkeys.forEach((k, mi) => {
       const mv = months[k];
-      const wr = mv.trades > 0 ? (mv.wins/mv.trades*100).toFixed(0) : 0;
-      html += `<div class="month-bar">
+      const wr = mv.trades > 0 ? (mv.wins/mv.trades*100).toFixed(1) : 0;
+      html += `<div class="month-bar" onclick="toggleDay('m${mi}')" style="cursor:pointer">
         <span class="d">${k.slice(5)}월</span>
         <div class="bw"><div class="b ${mv.pnl>=0?'bp':'bm'}" style="width:${Math.abs(mv.pnl)/maxM*100}%"></div></div>
         <span class="pn ${pc(mv.pnl)}">${ps(Math.round(mv.pnl))}</span>
-        <span class="info">${mv.trades}건 ${wr}%</span>
+      </div>
+      <div class="day-detail" id="ddm${mi}">
+        <div class="row"><span class="lbl">거래</span><span>${mv.trades}건</span></div>
+        <div class="row"><span class="lbl">승률</span><span>${wr}%</span></div>
+        <div class="row"><span class="lbl">성적</span><span>${mv.wins}승 ${mv.losses}패 ${mv.draws}무</span></div>
+        <div class="row"><span class="lbl">손익</span><span class="${pc(mv.pnl)}">${ps(Math.round(mv.pnl))}원</span></div>
       </div>`;
     });
     html += '</div>';
