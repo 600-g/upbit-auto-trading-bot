@@ -4945,6 +4945,8 @@ if __name__ == "__main__":
         MARKET_INTERVAL = 300     # 5분
         NEWS_INTERVAL = 1800      # 30분
         AUTOTUNE_INTERVAL = 10800 # 3시간 (v4.5: 빠른 피드백 루프)
+        DASHBOARD_INTERVAL = 300  # 5분마다 대시보드 업데이트
+        last_dashboard = 0
 
         while True:
             try:
@@ -4995,6 +4997,18 @@ if __name__ == "__main__":
 
                     bot.idle_fund_trade()
                     bot.surge_trade()
+
+                # v5.6: 대시보드 업데이트 (5분마다)
+                if now - last_dashboard >= DASHBOARD_INTERVAL:
+                    try:
+                        import subprocess as _sp
+                        _sp.Popen(
+                            [sys.executable, os.path.join(os.path.dirname(__file__), 'export_status.py')],
+                            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL
+                        )
+                    except:
+                        pass
+                    last_dashboard = now
 
                 # v5.6: 100사이클마다 메모리/상태 자가점검
                 if cycle > 0 and cycle % 100 == 0:

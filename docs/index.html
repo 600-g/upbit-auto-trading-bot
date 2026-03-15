@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>업비트 봇</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 12px; max-width: 600px; margin: 0 auto; }
+.hdr { display: flex; justify-content: space-between; align-items: center; padding: 8px 0 16px; }
+.hdr h1 { font-size: 17px; color: #58a6ff; }
+.hdr .tm { font-size: 11px; color: #484f58; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+.dot-on { background: #3fb950; box-shadow: 0 0 6px #3fb950; }
+.dot-off { background: #f85149; }
+.g { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+.c { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; }
+.c.wide { grid-column: 1 / -1; }
+.c .lb { font-size: 11px; color: #484f58; }
+.c .v { font-size: 22px; font-weight: 700; margin: 2px 0; }
+.c .s { font-size: 11px; color: #484f58; }
+.p { color: #3fb950; } .m { color: #f85149; } .z { color: #484f58; }
+.sec { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+.sec h2 { font-size: 13px; color: #58a6ff; margin-bottom: 8px; cursor: pointer; }
+.sec h2::after { content: ' ▾'; font-size: 10px; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { text-align: left; color: #484f58; font-weight: 500; padding: 4px 6px; border-bottom: 1px solid #30363d; }
+td { padding: 5px 6px; border-bottom: 1px solid #1c2028; }
+.tg { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; font-weight: 600; }
+.tw { background: #0d3321; color: #3fb950; }
+.tl { background: #3d1419; color: #f85149; }
+.td { background: #272c33; color: #484f58; }
+.ts { background: #1c2541; color: #79c0ff; }
+.tb { background: #272c33; color: #d2a8ff; }
+.bar { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; font-size: 11px; }
+.bar .d { width: 42px; color: #484f58; }
+.bar .bw { flex: 1; height: 16px; background: #1c2028; border-radius: 3px; overflow: hidden; }
+.bar .b { height: 100%; border-radius: 3px; min-width: 2px; transition: width .3s; }
+.bp { background: #238636; } .bm { background: #da3633; }
+.bar .pn { width: 80px; text-align: right; font-weight: 600; }
+.pos { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #1c2028; }
+.pos:last-child { border-bottom: none; }
+.pos .cn { font-weight: 700; font-size: 14px; }
+.pos .dt { font-size: 11px; color: #484f58; }
+.pos .pr { font-size: 15px; font-weight: 700; }
+.changelog { max-height: 200px; overflow-y: auto; }
+.cl-item { padding: 6px 0; border-bottom: 1px solid #1c2028; font-size: 12px; }
+.cl-item .cl-time { color: #484f58; font-size: 10px; }
+.cl-item .cl-desc { margin-top: 2px; }
+.cl-tag { font-size: 10px; padding: 1px 4px; border-radius: 3px; background: #1f3a5f; color: #58a6ff; }
+.err { text-align: center; padding: 40px; color: #484f58; }
+.loading { text-align: center; padding: 40px; color: #484f58; }
+</style>
+</head>
+<body>
+<div class="hdr">
+  <h1><span class="dot" id="dot"></span>업비트 봇</h1>
+  <span class="tm" id="tm"></span>
+</div>
+<div id="app"><div class="loading">로딩 중...</div></div>
+
+<script>
+const DATA_URL = 'status.json';
+const fmt = n => n.toLocaleString('ko-KR');
+const pc = n => n > 0 ? 'p' : n < 0 ? 'm' : 'z';
+const ps = n => (n > 0 ? '+' : '') + fmt(n);
+
+async function load() {
+  try {
+    const r = await fetch(DATA_URL + '?t=' + Date.now());
+    if (!r.ok) throw new Error('fetch failed');
+    const d = await r.json();
+    render(d);
+  } catch(e) {
+    document.getElementById('dot').className = 'dot dot-off';
+    document.getElementById('app').innerHTML = '<div class="err">데이터 로드 실패<br><small>status.json 확인</small></div>';
+  }
+}
+
+function render(d) {
+  document.getElementById('dot').className = 'dot ' + (d.bot_running ? 'dot-on' : 'dot-off');
+  document.getElementById('tm').textContent = d.updated;
+
+  const pnlPct = ((d.balance - 10000000) / 100000).toFixed(2);
+  const maxBar = Math.max(...d.daily.map(x => Math.abs(x.pnl)), 1);
+
+  let html = `
+  <div class="g">
+    <div class="c">
+      <div class="lb">잔고</div>
+      <div class="v">${fmt(d.balance)}</div>
+      <div class="s ${pc(d.total_pnl)}">${ps(d.total_pnl)}원 (${d.total_pnl>=0?'+':''}${pnlPct}%)</div>
+    </div>
+    <div class="c">
+      <div class="lb">승률</div>
+      <div class="v ${d.win_rate>=40?'p':d.win_rate>=30?'z':'m'}">${d.win_rate.toFixed(1)}%</div>
+      <div class="s">${d.wins}승 ${d.losses}패 ${d.draws}무 (${d.total_trades}건)</div>
+    </div>
+    <div class="c">
+      <div class="lb">오늘</div>
+      <div class="v ${pc(d.today_pnl)}">${ps(d.today_pnl)}</div>
+      <div class="s">${d.today_trades}건 | 승률 ${d.today_wr.toFixed(0)}%</div>
+    </div>
+    <div class="c">
+      <div class="lb">포지션</div>
+      <div class="v">${d.positions ? d.positions.length : 0}개</div>
+      <div class="s">${d.surge_watchlist || 0}개 워치</div>
+    </div>
+  </div>`;
+
+  // Positions
+  if (d.positions && d.positions.length > 0) {
+    html += '<div class="sec"><h2>보유 포지션</h2>';
+    d.positions.forEach(p => {
+      html += `<div class="pos">
+        <div><div class="cn">${p.coin} <span class="tg ${p.batch==='surge_trade'?'ts':'tb'}">${p.batch}</span></div>
+        <div class="dt">${fmt(p.amount)}원 · ${p.hold_min}분</div></div>
+        <div class="pr ${pc(p.profit_rate)}">${p.profit_rate>=0?'+':''}${p.profit_rate.toFixed(2)}%</div>
+      </div>`;
+    });
+    html += '</div>';
+  }
+
+  // Daily
+  html += '<div class="sec"><h2>일별 손익</h2>';
+  d.daily.forEach(x => {
+    html += `<div class="bar">
+      <span class="d">${x.date.slice(5)}</span>
+      <div class="bw"><div class="b ${x.pnl>=0?'bp':'bm'}" style="width:${Math.abs(x.pnl)/maxBar*100}%"></div></div>
+      <span class="pn ${pc(x.pnl)}">${ps(x.pnl)}</span>
+    </div>`;
+  });
+  html += '</div>';
+
+  // Batches
+  html += '<div class="sec"><h2>배치별</h2><table><tr><th>배치</th><th>거래</th><th>승률</th><th>손익</th></tr>';
+  d.batches.forEach(b => {
+    html += `<tr><td>${b.batch}</td><td>${b.total}</td><td>${b.win_rate.toFixed(0)}%</td><td class="${pc(b.pnl)}">${ps(b.pnl)}</td></tr>`;
+  });
+  html += '</table></div>';
+
+  // Changelog
+  if (d.changelog && d.changelog.length > 0) {
+    html += '<div class="sec"><h2>AutoTune 개선 로그</h2><div class="changelog">';
+    d.changelog.forEach(c => {
+      html += `<div class="cl-item">
+        <span class="cl-time">${c.time}</span> <span class="cl-tag">${c.type}</span>
+        <div class="cl-desc">${c.desc}</div>
+      </div>`;
+    });
+    html += '</div></div>';
+  }
+
+  // Recent trades
+  html += '<div class="sec"><h2>최근 거래</h2><table><tr><th>시간</th><th>코인</th><th>손익</th><th>배치</th></tr>';
+  d.recent.forEach(t => {
+    const tag = t.profit > 0 ? 'tw' : t.profit < 0 ? 'tl' : 'td';
+    html += `<tr><td>${t.time}</td><td>${t.coin}</td>
+      <td><span class="tg ${tag}">${ps(t.profit)}</span></td>
+      <td><span class="tg ${t.batch==='surge_trade'?'ts':'tb'}">${t.batch.replace('_trade','')}</span></td></tr>`;
+  });
+  html += '</table></div>';
+
+  document.getElementById('app').innerHTML = html;
+}
+
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>
