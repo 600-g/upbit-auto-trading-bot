@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>🚀 업비트 봇 v1.1.0</title>
+<title>🚀 업비트 봇 v1.1.1</title>
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -69,6 +69,14 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 .cl-tag { font-size: 10px; padding: 1px 4px; border-radius: 3px; background: #1f3a5f; color: #58a6ff; }
 .err { text-align: center; padding: 40px; color: #484f58; }
 .loading { text-align: center; padding: 40px; color: #484f58; }
+.menu-btn { font-size: 18px; cursor: pointer; padding: 4px 8px; color: #484f58; -webkit-tap-highlight-color: transparent; }
+.menu-btn:active { color: #58a6ff; }
+.overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 200; }
+.overlay.open { display: block; }
+.panel { position: fixed; top: 0; right: -280px; width: 280px; height: 100%; background: #161b22; border-left: 1px solid #30363d; z-index: 201; transition: right .25s ease; overflow-y: auto; padding: 16px; }
+.panel.open { right: 0; }
+.panel h3 { font-size: 14px; color: #58a6ff; margin-bottom: 12px; }
+.panel .close { position: absolute; top: 12px; right: 12px; font-size: 18px; color: #484f58; cursor: pointer; padding: 4px; }
 .mkt { display: flex; align-items: center; gap: 10px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
 .mkt .badge { font-size: 13px; font-weight: 700; padding: 3px 10px; border-radius: 6px; }
 .mkt .info { flex: 1; font-size: 11px; color: #8b949e; }
@@ -77,8 +85,14 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 </head>
 <body>
 <div class="hdr">
-  <h1><span class="dot" id="dot"></span>🚀 업비트 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.1.0</span></h1>
-  <span class="tm" id="tm"></span>
+  <h1><span class="dot" id="dot"></span>🚀 업비트 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.1.1</span></h1>
+  <div><span class="tm" id="tm"></span> <span class="menu-btn" onclick="toggleMenu()">☰</span></div>
+</div>
+<div id="overlay" class="overlay" onclick="toggleMenu()"></div>
+<div id="menuPanel" class="panel">
+  <span class="close" onclick="toggleMenu()">✕</span>
+  <h3>AutoTune 개선 로그</h3>
+  <div id="logList"></div>
 </div>
 <div id="app"><div class="loading">로딩 중...</div></div>
 
@@ -225,16 +239,21 @@ function render(d) {
   });
   html += '</table></div>';
 
-  // Changelog
+  // Changelog → 사이드 패널로 이동
   if (d.changelog && d.changelog.length > 0) {
-    html += '<div class="sec"><h2>AutoTune 개선 로그</h2><div class="changelog">';
-    d.changelog.forEach(c => {
-      html += `<div class="cl-item">
+    let logHtml = '';
+    const logShow = 5;
+    d.changelog.forEach((c, i) => {
+      const hide = i >= logShow ? ' style="display:none" class="log-row"' : ' class="log-row"';
+      logHtml += `<div${hide}><div class="cl-item">
         <span class="cl-time">${c.time}</span> <span class="cl-tag">${c.type}</span>
         <div class="cl-desc">${c.desc}</div>
-      </div>`;
+      </div></div>`;
     });
-    html += '</div></div>';
+    if (d.changelog.length > logShow) {
+      logHtml += `<div class="more-btn" onclick="showMoreLogs()">더보기 ▾</div>`;
+    }
+    document.getElementById('logList').innerHTML = logHtml;
   }
 
   // Recent trades (5개씩 더보기)
@@ -259,6 +278,23 @@ function render(d) {
   if (d.version) {
     window._dashVer = d.version;
     document.getElementById('ver').textContent = 'v' + d.version;
+  }
+}
+
+function toggleMenu() {
+  document.getElementById('overlay').classList.toggle('open');
+  document.getElementById('menuPanel').classList.toggle('open');
+}
+
+let logShown = 5;
+function showMoreLogs() {
+  const rows = document.querySelectorAll('.log-row');
+  const next = logShown + 5;
+  rows.forEach((r, i) => { if (i < next) r.style.display = ''; });
+  logShown = next;
+  if (logShown >= rows.length) {
+    const btn = event.target;
+    if (btn) btn.style.display = 'none';
   }
 }
 
