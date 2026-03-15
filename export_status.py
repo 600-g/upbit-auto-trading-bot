@@ -147,6 +147,39 @@ def export():
     except:
         pass
 
+    # 시장 지수 (BTC 등락 + 거래량 상위 코인 평균 등락)
+    market = {'grade': '보통', 'color': '#f0c040', 'btc_chg': 0, 'alt_chg': 0, 'detail': ''}
+    try:
+        import requests
+        # BTC 24h 변동
+        btc = requests.get('https://api.upbit.com/v1/ticker?markets=KRW-BTC', timeout=5).json()[0]
+        btc_chg = round(btc['signed_change_rate'] * 100, 2)
+        market['btc_chg'] = btc_chg
+
+        # 거래대금 상위 10개 알트 평균 등락
+        alt_resp = requests.get('https://api.upbit.com/v1/ticker?markets=' +
+            ','.join([f'KRW-{c}' for c in ['ETH','XRP','SOL','DOGE','ADA','AVAX','LINK','DOT','SAND','NEAR']]),
+            timeout=5).json()
+        all_tickers = alt_resp if isinstance(alt_resp, list) else []
+        alt_chgs = [t['signed_change_rate'] * 100 for t in all_tickers if 'signed_change_rate' in t]
+        alt_avg = round(sum(alt_chgs) / len(alt_chgs), 2) if alt_chgs else 0
+        market['alt_chg'] = alt_avg
+
+        # 종합 점수 → 등급
+        score = btc_chg * 0.5 + alt_avg * 0.5
+        if score >= 3:
+            market.update({'grade': '과열', 'color': '#f85149', 'detail': '급등 주의'})
+        elif score >= 1:
+            market.update({'grade': '상승', 'color': '#f85149', 'detail': '매수 우호적'})
+        elif score >= -1:
+            market.update({'grade': '보통', 'color': '#f0c040', 'detail': '횡보 구간'})
+        elif score >= -3:
+            market.update({'grade': '하락', 'color': '#3b82f6', 'detail': '관망 권장'})
+        else:
+            market.update({'grade': '위험', 'color': '#3b82f6', 'detail': '매수 자제'})
+    except:
+        pass
+
     conn.close()
 
     data = {
@@ -165,6 +198,7 @@ def export():
         'positions': positions,
         'surge_watchlist': surge_watchlist,
         'bot_running': bot_running,
+        'market': market,
         'updated': datetime.now().strftime('%m/%d %H:%M:%S')
     }
 
