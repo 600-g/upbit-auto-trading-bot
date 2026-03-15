@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>🚀 업비트 봇 v1.0.5</title>
+<title>🚀 업비트 봇 v1.0.6</title>
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -64,7 +64,7 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 </head>
 <body>
 <div class="hdr">
-  <h1><span class="dot" id="dot"></span>🚀 업비트 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.0.5</span></h1>
+  <h1><span class="dot" id="dot"></span>🚀 업비트 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.0.6</span></h1>
   <span class="tm" id="tm"></span>
 </div>
 <div id="app"><div class="loading">로딩 중...</div></div>
@@ -198,19 +198,29 @@ function render(d) {
   html += '</table></div>';
 
   document.getElementById('app').innerHTML = html;
+  if (d.version) {
+    window._dashVer = d.version;
+    document.getElementById('ver').textContent = 'v' + d.version;
+  }
 }
 
 load();
 setInterval(load, 30000);
 
-// 버전 탭 → 새로고침
-document.getElementById('ver').addEventListener('click', () => {
+// 버전 더블클릭 → 새로고침
+document.getElementById('ver').addEventListener('dblclick', () => {
   const v = document.getElementById('ver');
   v.style.color = '#3fb950';
-  v.textContent = '새로고침...';
+  v.style.background = '#3fb95022';
+  v.textContent = '🔄 새로고침...';
   load().then(() => {
+    v.style.color = '#3fb950';
     v.textContent = '✓ 완료';
-    setTimeout(() => { v.textContent = 'v1.0.5'; v.style.color = '#484f58'; }, 1000);
+    setTimeout(() => {
+      v.style.color = '#484f58';
+      v.style.background = 'none';
+      v.textContent = 'v' + (window._dashVer || '1.0.6');
+    }, 1200);
   });
 });
 </script>
