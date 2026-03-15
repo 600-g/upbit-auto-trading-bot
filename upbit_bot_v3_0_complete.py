@@ -4584,38 +4584,22 @@ class TradingBotV3:
                     self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False}
                     continue
 
-                # === 4. v5.6: 횡보 처리 — 손실 없으면 팔지 않음 ===
-                # 원칙: 0% 이상이면 거래량/모멘텀 보고 버티다가 수익 나면 팔기
+                # === 4. v5.6: 횡보 처리 — 모멘텀 점검 후 판단 ===
+                # 원칙: 성급하게 팔아 수수료만 날리지 말고, 모멘텀/거래량 보고 판단
+                # 단, 지속 횡보면 자금 묶이지 않게 정리
                 if hours >= 0.75 and abs(profit_rate) < 0.01 and not uptrend:
-                    if profit_rate >= 0:
-                        # 손실 아님 → 팔지 않고 유지. 거래량 체크해서 상승 가능성 판단
-                        _vol_ok = False
-                        try:
-                            _vol_score = self.analyze_volume(coin)
-                            _vol_ok = _vol_score >= 40
-                        except:
-                            pass
-                        if _vol_ok or momentum >= 30:
-                            print(f"  ⏳ {coin} {batch_id} 횡보 {hours:.1f}시간 but 손실 없음 + {'거래량↑' if _vol_ok else f'모멘텀{momentum:.0f}점'} → 수익 대기")
-                        else:
-                            # 거래량/모멘텀 둘 다 약하면 스왑 시도
-                            better = self._find_better_coin(coin, momentum)
-                            if better and better[0] not in self.positions:
-                                print(f"🔄 {coin} {batch_id} 횡보 {hours:.1f}시간 + 거래량↓ + 모멘텀↓ → {better[0]}({better[1]}점)으로 교체")
-                                if self.place_sell_order(coin, batch_id):
-                                    time.sleep(2)
-                                    self.place_buy_order(better[0], position['amount'], momentum=better[1])
-                                continue
-                            elif hours >= 3.0:
-                                # 3시간 넘으면 자금 묶임 방지 강제 정리
-                                print(f"  🔚 {coin} {batch_id} 횡보 {hours:.1f}시간 + 모멘텀/거래량 약 → 강제 정리")
-                                self.place_sell_order(coin, batch_id)
-                                self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False}
-                                continue
-                            else:
-                                print(f"  ⏳ {coin} {batch_id} 횡보 {hours:.1f}시간, 대안 없음 → 유지 (손실 없음)")
-                    else:
-                        # 손실 중 횡보 → 기존 로직 (스왑 또는 정리)
+                    _vol_ok = False
+                    try:
+                        _vol_score = self.analyze_volume(coin)
+                        _vol_ok = _vol_score >= 40
+                    except:
+                        pass
+
+                    if _vol_ok or momentum >= 30:
+                        # 거래량/모멘텀 살아있음 → 아직 기회 있으니 유지
+                        print(f"  ⏳ {coin} {batch_id} 횡보 {hours:.1f}시간 | {'거래량↑' if _vol_ok else ''} 모멘텀{momentum:.0f}점 → 유지")
+                    elif hours >= 2.0:
+                        # 2시간+ 횡보 + 모멘텀/거래량 약 → 더 좋은 코인 있으면 스왑, 없으면 정리
                         better = self._find_better_coin(coin, momentum)
                         if better and better[0] not in self.positions:
                             print(f"🔄 {coin} {batch_id} 횡보 {hours:.1f}시간 ({profit_rate*100:+.2f}%) → {better[0]}({better[1]}점)으로 교체")
@@ -4623,13 +4607,17 @@ class TradingBotV3:
                                 time.sleep(2)
                                 self.place_buy_order(better[0], position['amount'], momentum=better[1])
                             continue
-                        elif hours >= 2.0:
-                            print(f"  🔚 {coin} {batch_id} 횡보 {hours:.1f}시간 + 손실 {profit_rate*100:+.2f}% → 강제 정리")
+                        elif hours >= 3.0:
+                            # 3시간 넘으면 자금 묶임 방지 정리
+                            print(f"  🔚 {coin} {batch_id} 횡보 {hours:.1f}시간 + 모멘텀{momentum:.0f}점↓ → 정리")
                             self.place_sell_order(coin, batch_id)
                             self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False}
                             continue
                         else:
-                            print(f"  ⚠️ {coin} {batch_id} 횡보 {hours:.1f}시간 + 모멘텀 {momentum}점 (2h 후 정리)")
+                            print(f"  ⚠️ {coin} {batch_id} 횡보 {hours:.1f}시간 + 모멘텀{momentum:.0f}점↓ (3h 후 정리)")
+                    else:
+                        # 45분~2시간: 아직 지켜볼 시간
+                        print(f"  ⏳ {coin} {batch_id} 횡보 {hours:.1f}시간 | 모멘텀{momentum:.0f}점 → 지켜보는 중")
 
                 # 상태 출력
                 status = "📈 상승중" if uptrend else "➡️ 횡보" if abs(profit_rate) < 0.01 else "📉 하락중"
