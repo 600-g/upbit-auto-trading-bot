@@ -60,22 +60,45 @@ def export():
     except:
         pass
 
-    # Positions
+    # Positions (DB active_positions 기준 + 현재가 조회)
     positions = []
     surge_watchlist = 0
     try:
-        if os.path.exists(POS_PATH):
-            with open(POS_PATH) as f:
-                pd = json.load(f)
+        c.execute('SELECT positions_json FROM active_positions LIMIT 1')
+        row = c.fetchone()
+        if row:
+            pd = json.loads(row[0])
             now_ts = datetime.now().timestamp()
+            all_coins = []
+
+            # 일반 배치 포지션
             for coin, bs in pd.get('positions', {}).items():
                 for bid, p in bs.items():
+                    all_coins.append(coin)
                     hm = int((now_ts - p.get('timestamp', now_ts)) / 60)
-                    positions.append({'coin': coin, 'batch': bid, 'amount': p.get('amount', 0), 'profit_rate': round((p.get('peak_rate', 0) or 0) * 100, 2), 'hold_min': hm})
+                    positions.append({'coin': coin, 'batch': bid, 'buy_price': p.get('buy_price', 0), 'amount': p.get('amount', 0), 'profit_rate': 0, 'hold_min': hm})
+
+            # surge 포지션
             for coin, p in pd.get('surge', {}).items():
+                all_coins.append(coin)
                 hm = int((now_ts - p.get('timestamp', now_ts)) / 60)
-                positions.append({'coin': coin, 'batch': 'surge_trade', 'amount': p.get('amount', 0), 'profit_rate': round((p.get('peak_rate', 0) or 0) * 100, 2), 'hold_min': hm})
+                positions.append({'coin': coin, 'batch': 'surge_trade', 'buy_price': p.get('buy_price', 0), 'amount': p.get('amount', 0), 'profit_rate': 0, 'hold_min': hm})
+
             surge_watchlist = len(pd.get('surge_watchlist', {}))
+
+            # 현재가 조회 (업비트 API)
+            if all_coins:
+                import requests
+                markets = ','.join([f'KRW-{c}' for c in set(all_coins)])
+                resp = requests.get(f'https://api.upbit.com/v1/ticker?markets={markets}', timeout=5)
+                if resp.status_code == 200:
+                    prices = {t['market'].replace('KRW-', ''): t['trade_price'] for t in resp.json()}
+                    for pos in positions:
+                        cur = prices.get(pos['coin'], 0)
+                        bp = pos['buy_price']
+                        if bp and cur:
+                            pos['cur_price'] = cur
+                            pos['profit_rate'] = round((cur - bp) / bp * 100, 2)
     except:
         pass
 
@@ -90,10 +113,44 @@ def export():
     except:
         pass
 
+    # 잔고: DB active_positions 우선, 없으면 누적 계산
+    balance = 10000000 + total_pnl
+    try:
+        c.execute('SELECT balance FROM active_positions LIMIT 1')
+        row = c.fetchone()
+        if row and row[0]:
+            balance = row[0]
+    except:
+        pass
+
+    # 실전 모드: 업비트 실제 잔고 조회
+    CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
+    try:
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH) as f:
+                cfg = json.load(f)
+            if cfg.get('access_key') and cfg.get('secret_key'):
+                import pyupbit
+                upbit = pyupbit.Upbit(cfg['access_key'], cfg['secret_key'])
+                krw = upbit.get_balance('KRW') or 0
+                # 보유 코인 평가액 합산
+                balances = upbit.get_balances()
+                coin_val = 0
+                for b in balances:
+                    if b['currency'] != 'KRW' and float(b['balance']) > 0:
+                        cur_price = pyupbit.get_current_price(f"KRW-{b['currency']}")
+                        if cur_price:
+                            coin_val += cur_price * float(b['balance'])
+                real_balance = krw + coin_val
+                if real_balance > 0:
+                    balance = real_balance
+    except:
+        pass
+
     conn.close()
 
     data = {
-        'balance': 10000000 + total_pnl,
+        'balance': balance,
         'total_pnl': total_pnl,
         'total_trades': total,
         'wins': wins, 'losses': losses, 'draws': draws,

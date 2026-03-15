@@ -19,7 +19,7 @@ body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMac
 .c .lb { font-size: 11px; color: #484f58; }
 .c .v { font-size: 22px; font-weight: 700; margin: 2px 0; }
 .c .s { font-size: 11px; color: #484f58; }
-.p { color: #3fb950; } .m { color: #f85149; } .z { color: #484f58; }
+.p { color: #f85149; } .m { color: #3b82f6; } .z { color: #484f58; }
 .sec { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
 .sec h2 { font-size: 13px; color: #58a6ff; margin-bottom: 8px; cursor: pointer; }
 .sec h2::after { content: ' ▾'; font-size: 10px; }
@@ -27,8 +27,8 @@ table { width: 100%; border-collapse: collapse; font-size: 12px; }
 th { text-align: left; color: #484f58; font-weight: 500; padding: 4px 6px; border-bottom: 1px solid #30363d; }
 td { padding: 5px 6px; border-bottom: 1px solid #1c2028; }
 .tg { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; font-weight: 600; }
-.tw { background: #0d3321; color: #3fb950; }
-.tl { background: #3d1419; color: #f85149; }
+.tw { background: #3d1419; color: #f85149; }
+.tl { background: #1e2a4a; color: #3b82f6; }
 .td { background: #272c33; color: #484f58; }
 .ts { background: #1c2541; color: #79c0ff; }
 .tb { background: #272c33; color: #d2a8ff; }
@@ -36,7 +36,7 @@ td { padding: 5px 6px; border-bottom: 1px solid #1c2028; }
 .bar .d { width: 42px; color: #484f58; }
 .bar .bw { flex: 1; height: 16px; background: #1c2028; border-radius: 3px; overflow: hidden; }
 .bar .b { height: 100%; border-radius: 3px; min-width: 2px; transition: width .3s; }
-.bp { background: #238636; } .bm { background: #da3633; }
+.bp { background: #da3633; } .bm { background: #3b82f6; }
 .bar .pn { width: 80px; text-align: right; font-weight: 600; }
 .pos { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #1c2028; }
 .pos:last-child { border-bottom: none; }
@@ -109,13 +109,17 @@ function render(d) {
   </div>`;
 
   // Positions
+  const bn = {'batch_1':'1차','batch_2':'2차','batch_3':'3차','surge_trade':'급등'};
   if (d.positions && d.positions.length > 0) {
     html += '<div class="sec"><h2>보유 포지션</h2>';
     d.positions.forEach(p => {
-      const bn = {'batch_1':'1차','batch_2':'2차','batch_3':'3차','surge_trade':'급등'};
+      const holdTxt = p.hold_min >= 60 ? `${Math.floor(p.hold_min/60)}시간 ${p.hold_min%60}분` : `${p.hold_min}분`;
+      const curPrice = p.cur_price ? fmt(p.cur_price) : '-';
+      const buyPrice = p.buy_price ? fmt(p.buy_price) : '-';
       html += `<div class="pos">
         <div><div class="cn">${p.coin} <span class="tg ${p.batch==='surge_trade'?'ts':'tb'}">${bn[p.batch]||p.batch}</span></div>
-        <div class="dt">${fmt(p.amount)}원 · ${p.hold_min}분</div></div>
+        <div class="dt">${fmt(p.amount)}원 · ${holdTxt}</div>
+        <div class="dt">매수 ${buyPrice} → 현재 ${curPrice}</div></div>
         <div class="pr ${pc(p.profit_rate)}">${p.profit_rate>=0?'+':''}${p.profit_rate.toFixed(2)}%</div>
       </div>`;
     });
