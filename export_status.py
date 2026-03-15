@@ -36,9 +36,20 @@ def export():
     today_pnl = row[2] or 0
     today_wr = (today_wins / today_trades * 100) if today_trades > 0 else 0
 
-    # Daily
-    c.execute('SELECT substr(timestamp,1,10) as day, SUM(profit), COUNT(*) FROM trades WHERE action="sell" GROUP BY day ORDER BY day')
-    daily = [{'date': r[0], 'pnl': r[1] or 0, 'trades': r[2]} for r in c.fetchall()]
+    # Daily (상세 포함)
+    c.execute('''SELECT substr(timestamp,1,10) as day, SUM(profit), COUNT(*),
+        SUM(CASE WHEN profit>0 THEN 1 ELSE 0 END),
+        SUM(CASE WHEN profit<0 THEN 1 ELSE 0 END),
+        SUM(CASE WHEN profit=0 THEN 1 ELSE 0 END)
+        FROM trades WHERE action="sell" GROUP BY day ORDER BY day''')
+    daily = []
+    for r in c.fetchall():
+        t = r[2] or 0
+        w = r[3] or 0
+        l = r[4] or 0
+        dr = r[5] or 0
+        wr = round(w / t * 100, 1) if t > 0 else 0
+        daily.append({'date': r[0], 'pnl': r[1] or 0, 'trades': t, 'wins': w, 'losses': l, 'draws': dr, 'win_rate': wr})
 
     # Batches
     c.execute('SELECT batch, COUNT(*), SUM(CASE WHEN profit>0 THEN 1 ELSE 0 END), SUM(profit) FROM trades WHERE action="sell" GROUP BY batch')
@@ -199,7 +210,7 @@ def export():
         'surge_watchlist': surge_watchlist,
         'bot_running': bot_running,
         'market': market,
-        'version': '1.0.6',
+        'version': '1.0.7',
         'updated': datetime.now().strftime('%m/%d %H:%M:%S')
     }
 
