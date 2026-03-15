@@ -60,7 +60,7 @@ td { padding: 5px 6px; border-bottom: 1px solid #1c2028; }
 </head>
 <body>
 <div class="hdr">
-  <h1><span class="dot" id="dot"></span>🚀 업비트 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.1.0</span></h1>
+  <h1><span class="dot" id="dot"></span>🚀 업비트 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.0.1</span></h1>
   <span class="tm" id="tm"></span>
 </div>
 <div id="app"><div class="loading">로딩 중...</div></div>
@@ -203,7 +203,7 @@ document.getElementById('ver').addEventListener('click', () => {
   v.textContent = '새로고침...';
   load().then(() => {
     v.textContent = '✓ 완료';
-    setTimeout(() => { v.textContent = 'v1.1.0'; v.style.color = '#484f58'; }, 1000);
+    setTimeout(() => { v.textContent = 'v1.0.1'; v.style.color = '#484f58'; }, 1000);
   });
 });
 </script>
