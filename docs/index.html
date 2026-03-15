@@ -112,8 +112,9 @@ function render(d) {
   if (d.positions && d.positions.length > 0) {
     html += '<div class="sec"><h2>보유 포지션</h2>';
     d.positions.forEach(p => {
+      const bn = {'batch_1':'1차','batch_2':'2차','batch_3':'3차','surge_trade':'급등'};
       html += `<div class="pos">
-        <div><div class="cn">${p.coin} <span class="tg ${p.batch==='surge_trade'?'ts':'tb'}">${p.batch}</span></div>
+        <div><div class="cn">${p.coin} <span class="tg ${p.batch==='surge_trade'?'ts':'tb'}">${bn[p.batch]||p.batch}</span></div>
         <div class="dt">${fmt(p.amount)}원 · ${p.hold_min}분</div></div>
         <div class="pr ${pc(p.profit_rate)}">${p.profit_rate>=0?'+':''}${p.profit_rate.toFixed(2)}%</div>
       </div>`;
@@ -133,9 +134,16 @@ function render(d) {
   html += '</div>';
 
   // Batches
-  html += '<div class="sec"><h2>배치별</h2><table><tr><th>배치</th><th>거래</th><th>승률</th><th>손익</th></tr>';
+  const batchNames = {
+    'batch_1': '1차 매수',
+    'batch_2': '2차 매수 (물타기)',
+    'batch_3': '3차 매수 (물타기)',
+    'surge_trade': '급등 추격'
+  };
+  html += '<div class="sec"><h2>배치별 성적</h2><table><tr><th>배치</th><th>거래</th><th>승률</th><th>손익</th></tr>';
   d.batches.forEach(b => {
-    html += `<tr><td>${b.batch}</td><td>${b.total}</td><td>${b.win_rate.toFixed(0)}%</td><td class="${pc(b.pnl)}">${ps(b.pnl)}</td></tr>`;
+    const name = batchNames[b.batch] || b.batch;
+    html += `<tr><td>${name}</td><td>${b.total}</td><td>${b.win_rate.toFixed(0)}%</td><td class="${pc(b.pnl)}">${ps(b.pnl)}</td></tr>`;
   });
   html += '</table></div>';
 
@@ -157,7 +165,7 @@ function render(d) {
     const tag = t.profit > 0 ? 'tw' : t.profit < 0 ? 'tl' : 'td';
     html += `<tr><td>${t.time}</td><td>${t.coin}</td>
       <td><span class="tg ${tag}">${ps(t.profit)}</span></td>
-      <td><span class="tg ${t.batch==='surge_trade'?'ts':'tb'}">${t.batch.replace('_trade','')}</span></td></tr>`;
+      <td><span class="tg ${t.batch==='surge_trade'?'ts':'tb'}">${batchNames[t.batch] || t.batch}</span></td></tr>`;
   });
   html += '</table></div>';
 
