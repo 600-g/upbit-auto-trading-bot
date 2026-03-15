@@ -3,8 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>🚀 업비트 봇 v1.0.2</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚀</text></svg>">
+<title>🚀 업비트 봇 v1.0.3</title>
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="업비트 봇">
 <style>
 html { overscroll-behavior-y: contain; }
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -60,7 +64,7 @@ td { padding: 5px 6px; border-bottom: 1px solid #1c2028; }
 </head>
 <body>
 <div class="hdr">
-  <h1><span class="dot" id="dot"></span>🚀 업비트 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.0.2</span></h1>
+  <h1><span class="dot" id="dot"></span>🚀 업비트 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.0.3</span></h1>
   <span class="tm" id="tm"></span>
 </div>
 <div id="app"><div class="loading">로딩 중...</div></div>
@@ -203,7 +207,7 @@ document.getElementById('ver').addEventListener('click', () => {
   v.textContent = '새로고침...';
   load().then(() => {
     v.textContent = '✓ 완료';
-    setTimeout(() => { v.textContent = 'v1.0.2'; v.style.color = '#484f58'; }, 1000);
+    setTimeout(() => { v.textContent = 'v1.0.3'; v.style.color = '#484f58'; }, 1000);
   });
 });
 </script>
