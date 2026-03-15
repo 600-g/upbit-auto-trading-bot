@@ -259,7 +259,6 @@ function render(d) {
   if (d.version) {
     window._dashVer = d.version;
     document.getElementById('ver').textContent = 'v' + d.version;
-    checkVersion();
   }
 }
 
@@ -282,16 +281,6 @@ function showMore() {
 
 load();
 setInterval(load, 30000);
-
-// 현재 HTML에 박힌 버전
-const HTML_VER = '1.0.10';
-
-// 데이터 로드 후 버전 불일치 시 자동 페이지 새로고침
-function checkVersion() {
-  if (window._dashVer && window._dashVer !== HTML_VER) {
-    location.reload(true);
-  }
-}
 
 // 버전 더블탭 → 페이지 강제 새로고침 (모바일+PC)
 (function() {
