@@ -2487,8 +2487,149 @@ class TradingBotV3:
             else:
                 print(f"🤖 [AutoTune] 조정 필요 없음")
             self._autotune_apply_rules()
+            # v5.6: 패배 패턴 자동 개선
+            self._autotune_pattern_improve()
         except Exception as e:
             print(f"⚠️ [AutoTune] 오류: {e}")
+
+    def _autotune_pattern_improve(self):
+        """v5.6: 패배 패턴 분석 → 시뮬레이션 → 승률 개선 시에만 적용"""
+        try:
+            from datetime import timedelta
+            now = datetime.now()
+            window = (now - timedelta(hours=24)).isoformat()
+
+            with self._db_lock:
+                cursor = self.db.execute(
+                    """SELECT t2.timestamp, t2.coin, t2.profit, t2.profit_rate, t2.batch, t2.momentum,
+                              t1.timestamp as buy_ts
+                       FROM trades t2
+                       JOIN trades t1 ON t1.coin = t2.coin AND t1.batch = t2.batch
+                            AND t1.action='buy' AND t1.id < t2.id
+                       WHERE t2.action='sell' AND t2.timestamp >= ?
+                       ORDER BY t2.id""",
+                    (window,)
+                )
+                sells = cursor.fetchall()
+
+            if len(sells) < 10:
+                return
+
+            # 거래 파싱
+            trades = []
+            for r in sells:
+                try:
+                    hold = (datetime.fromisoformat(r[0]) - datetime.fromisoformat(r[6])).total_seconds() / 60
+                    hour = int(r[0][11:13])
+                except:
+                    hold, hour = 0, 12
+                trades.append({
+                    'profit': r[2] or 0, 'pr': r[3] or 0, 'batch': r[4],
+                    'mom': r[5] or 0, 'hold': hold, 'hour': hour, 'coin': r[1]
+                })
+
+            total = len(trades)
+            wins = sum(1 for t in trades if t['profit'] > 0)
+            current_wr = wins / total * 100
+            current_pnl = sum(t['profit'] for t in trades)
+
+            # === 패턴 후보 탐색 ===
+            candidates = []
+
+            # 패턴1: surge 가짜급등 (5분내 -1%+)
+            p1 = [t for t in trades if t['batch'] == 'surge_trade' and t['hold'] <= 5 and t['pr'] <= -1.0]
+            p1_wins = [t for t in trades if t['batch'] == 'surge_trade' and t['hold'] <= 5 and t['pr'] > 0]
+            if len(p1) >= 2 and len(p1_wins) == 0:
+                saved = sum(abs(t['profit']) for t in p1)
+                candidates.append(('surge_quick_loss', len(p1), saved, 'surge 5분내 -1%+ 차단'))
+
+            # 패턴2: 특정 시간대 전패
+            for h_start, h_end, label in [(6, 9, 'dawn'), (23, 24, 'late_night'), (0, 5, 'midnight')]:
+                period = [t for t in trades if h_start <= t['hour'] < h_end]
+                period_wins = [t for t in period if t['profit'] > 0]
+                period_losses = [t for t in period if t['profit'] < 0]
+                if len(period) >= 3 and len(period_wins) == 0 and len(period_losses) >= 2:
+                    saved = sum(abs(t['profit']) for t in period_losses)
+                    candidates.append((f'time_block_{label}', len(period_losses), saved, f'{h_start}~{h_end}시 전패'))
+
+            # 패턴3: 특정 코인 연패 (3회+)
+            coin_trades = {}
+            for t in trades:
+                coin_trades.setdefault(t['coin'], []).append(t)
+            for coin, cts in coin_trades.items():
+                losses = [t for t in cts if t['profit'] < 0]
+                wins_c = [t for t in cts if t['profit'] > 0]
+                if len(losses) >= 3 and len(wins_c) == 0:
+                    saved = sum(abs(t['profit']) for t in losses)
+                    candidates.append((f'coin_ban_{coin}', len(losses), saved, f'{coin} {len(losses)}연패'))
+
+            # 패턴4: 보유시간별 패턴 (특정 구간 승률 0%)
+            for hold_min, hold_max, label in [(0, 3, 'ultra_quick'), (30, 60, 'mid_hold')]:
+                band = [t for t in trades if hold_min <= t['hold'] < hold_max]
+                band_wins = [t for t in band if t['profit'] > 0]
+                band_losses = [t for t in band if t['profit'] < 0]
+                if len(band) >= 3 and len(band_wins) == 0 and len(band_losses) >= 2:
+                    saved = sum(abs(t['profit']) for t in band_losses)
+                    candidates.append((f'hold_{label}', len(band_losses), saved, f'{hold_min}~{hold_max}분 보유 전패'))
+
+            if not candidates:
+                print(f"🤖 [AutoTune] 패턴 분석: 개선 후보 없음 (현재 승률 {current_wr:.1f}%)")
+                return
+
+            # === 시뮬레이션: 후보 적용 시 승률 계산 ===
+            best = None
+            for name, blocked_count, saved_pnl, desc in candidates:
+                # 패배만 차단, 승리는 유지 → 승률 계산
+                new_total = total - blocked_count
+                new_wins = wins  # 승리는 그대로
+                if new_total > 0:
+                    new_wr = new_wins / new_total * 100
+                    improvement = new_wr - current_wr
+                    if improvement > 0 and (best is None or improvement > best['improvement']):
+                        best = {
+                            'name': name, 'desc': desc,
+                            'blocked': blocked_count, 'saved': saved_pnl,
+                            'new_wr': new_wr, 'improvement': improvement
+                        }
+
+            if not best:
+                print(f"🤖 [AutoTune] 패턴 분석: 승률 개선 후보 없음")
+                return
+
+            # === 승률 개선 확인 → 적용 ===
+            print(f"🤖 [AutoTune] 패턴 발견: {best['desc']}")
+            print(f"   차단 {best['blocked']}건 | 절약 +{best['saved']:,.0f}원 | 승률 {current_wr:.1f}% → {best['new_wr']:.1f}% (+{best['improvement']:.1f}%p)")
+
+            # 규칙 적용
+            rule_name = best['name']
+            if rule_name == 'surge_quick_loss':
+                # surge 최소 보유시간을 5분으로 확장 (현재 3분)
+                # → _surge_min_hold 변수로 관리
+                if not hasattr(self, '_surge_min_hold') or self._surge_min_hold < 5:
+                    self._surge_min_hold = 5
+                    print(f"   ✅ 적용: surge 최소 보유 3분 → 5분")
+            elif rule_name.startswith('time_block_'):
+                # 해당 시간대 모멘텀 기준 강화
+                if not hasattr(self, '_autotune_time_boost'):
+                    self._autotune_time_boost = {}
+                period = rule_name.replace('time_block_', '')
+                self._autotune_time_boost[period] = 10  # +10점 부스트
+                print(f"   ✅ 적용: {best['desc']} → min_score +10점")
+            elif rule_name.startswith('coin_ban_'):
+                coin = rule_name.replace('coin_ban_', '')
+                if coin not in self._autotune_blacklist:
+                    self._autotune_blacklist.append(coin)
+                    print(f"   ✅ 적용: {coin} 블랙리스트 추가")
+            elif rule_name.startswith('hold_'):
+                # 보유시간 관련 → 최소 보유시간 확대
+                if not hasattr(self, '_min_hold_normal'):
+                    self._min_hold_normal = 5
+                print(f"   ✅ 적용: 일반 매매 최소 보유 5분")
+
+            self._notify(f"[AutoTune] 패턴 개선: {best['desc']} | 승률 {current_wr:.1f}→{best['new_wr']:.1f}% (+{best['improvement']:.1f}%p) | 절약 +{best['saved']:,.0f}원")
+
+        except Exception as e:
+            print(f"⚠️ [AutoTune] 패턴 분석 오류: {e}")
 
     def calculate_momentum(self, coin):
         """종합 모멘텀 점수 (0~100점) - 5분 캐시 + 15초 타임아웃 + v5.2 EMA 평활화"""
@@ -2952,6 +3093,16 @@ class TradingBotV3:
         if _cur_hour >= 23 or _cur_hour < 6:
             min_score = min(min_score + 8, 35)  # +8점 가산
             print(f"🌙 심야({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
+        # v5.6: AutoTune 시간대 부스트 (새벽 등 전패 구간 자동 감지)
+        _time_boost = getattr(self, '_autotune_time_boost', {})
+        if _time_boost:
+            if 6 <= _cur_hour < 9 and 'dawn' in _time_boost:
+                min_score = min(min_score + _time_boost['dawn'], 35)
+                print(f"🤖 새벽({_cur_hour:02d}시) AutoTune 부스트 → {min_score}점")
+            elif _cur_hour >= 23 and 'late_night' in _time_boost:
+                min_score = min(min_score + _time_boost['late_night'], 35)
+            elif _cur_hour < 5 and 'midnight' in _time_boost:
+                min_score = min(min_score + _time_boost['midnight'], 35)
 
         # 코인 선택
         selected = self.select_coins()
@@ -4061,10 +4212,10 @@ class TradingBotV3:
                 if profit_rate <= -0.02:
                     sell_reason = f"절대 손절 {profit_rate*100:+.2f}%"
 
-                # v5.6: 최소 보유 3분 (데이터: 0~3분 매도 승률 32%, -55k 손실)
-                # -2% 절대 손절만 예외, 나머지는 3분 이상 보유
-                elif elapsed_min < 3:
-                    print(f"  🚀 [SURGE] {coin}: {profit_rate*100:+.2f}% | 최소보유 대기 ({elapsed_min:.1f}분/3분)")
+                # v5.6: 최소 보유시간 (AutoTune 동적 조정, 기본 5분)
+                # 데이터: surge 5분내 -1%+ = 전패. 5분은 버텨야 함
+                elif elapsed_min < getattr(self, '_surge_min_hold', 5):
+                    print(f"  🚀 [SURGE] {coin}: {profit_rate*100:+.2f}% | 최소보유 대기 ({elapsed_min:.1f}분/{getattr(self, '_surge_min_hold', 5)}분)")
                     continue
 
                 # 2. v5.4: 스마트 손절 — 손절 구간(-1%~-2%)에서 거래량 보고 최적 타이밍
