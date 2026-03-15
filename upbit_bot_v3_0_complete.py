@@ -547,7 +547,16 @@ class TradingBotV3:
             )
 
             if result.returncode == 0 and result.stdout.strip():
-                self._tg_send(result.stdout.strip())
+                reply_text = result.stdout.strip()
+                self._tg_send(reply_text)
+                # 대시보드 채팅에도 응답
+                try:
+                    subprocess.run(
+                        [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'chat_reply.py'), reply_text],
+                        capture_output=True, timeout=30
+                    )
+                except:
+                    pass
             else:
                 self._tg_send("⚠️ AI 응답을 가져올 수 없습니다.")
                 print(f"⚠️ Claude CLI 오류: rc={result.returncode} stderr={result.stderr[:200]}")
