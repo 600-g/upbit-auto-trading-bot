@@ -65,7 +65,7 @@ def export():
     # Changelog (AutoTune rules from DB)
     changelog = []
     try:
-        c.execute("SELECT created_at, rule_type, reason FROM autotune_rules ORDER BY id DESC LIMIT 10")
+        c.execute("SELECT created_at, rule_type, reason FROM auto_tune_rules ORDER BY id DESC LIMIT 10")
         for r in c.fetchall():
             changelog.append({'time': r[0][:16] if r[0] else '', 'type': r[1], 'desc': r[2]})
     except:
@@ -210,7 +210,7 @@ def export():
         'surge_watchlist': surge_watchlist,
         'bot_running': bot_running,
         'market': market,
-        'version': '1.0.10',
+        'version': '1.1.0',
         'updated': datetime.now().strftime('%m/%d %H:%M:%S')
     }
 
