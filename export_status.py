@@ -58,6 +58,18 @@ def export():
         wr = (r[2] or 0) / r[1] * 100 if r[1] else 0
         batches.append({'batch': r[0], 'total': r[1], 'win_rate': wr, 'pnl': r[3] or 0})
 
+    # Coins (코인별 성적)
+    c.execute('''SELECT coin, COUNT(*),
+        SUM(CASE WHEN profit>0 THEN 1 ELSE 0 END),
+        SUM(CASE WHEN profit<0 THEN 1 ELSE 0 END),
+        SUM(profit) FROM trades WHERE action="sell" GROUP BY coin ORDER BY COUNT(*) DESC LIMIT 30''')
+    coins = []
+    for r in c.fetchall():
+        t = r[1] or 0
+        w = r[2] or 0
+        wr = round(w / t * 100, 1) if t > 0 else 0
+        coins.append({'coin': r[0], 'total': t, 'wins': w, 'losses': r[3] or 0, 'win_rate': wr, 'pnl': r[4] or 0})
+
     # Recent
     c.execute('SELECT timestamp, coin, profit, profit_rate, batch FROM trades WHERE action="sell" ORDER BY id DESC LIMIT 20')
     recent = [{'time': r[0][5:16] if r[0] else '', 'coin': r[1], 'profit': r[2] or 0, 'profit_rate': r[3] or 0, 'batch': r[4]} for r in c.fetchall()]
@@ -205,12 +217,13 @@ def export():
         'daily': daily,
         'batches': batches,
         'recent': recent,
+        'coins': coins,
         'changelog': changelog,
         'positions': positions,
         'surge_watchlist': surge_watchlist,
         'bot_running': bot_running,
         'market': market,
-        'version': '1.1.3',
+        'version': '1.1.4',
         'updated': datetime.now().strftime('%m/%d %H:%M:%S')
     }
 

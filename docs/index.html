@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>🚀 업비트 자동매매 봇 v1.1.3</title>
+<title>🚀 업비트 자동매매 봇 v1.1.4</title>
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -77,17 +77,19 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 .panel.open { right: 0; }
 .panel h3 { font-size: 14px; color: #58a6ff; margin-bottom: 12px; }
 .panel .close { position: absolute; top: 12px; right: 12px; font-size: 18px; color: #484f58; cursor: pointer; padding: 4px; }
-.chat-wrap { border-top: 1px solid #30363d; margin-top: 16px; padding-top: 12px; }
+.chat-wrap { border-top: 1px solid #30363d; margin-top: 16px; padding-top: 12px; display: flex; flex-direction: column; flex: 1; }
 .chat-wrap h3 { margin-bottom: 8px; }
-.chat-input { display: flex; gap: 6px; }
-.chat-input input { flex: 1; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px; color: #c9d1d9; font-size: 13px; outline: none; }
-.chat-input input:focus { border-color: #58a6ff; }
-.chat-input button { background: #238636; border: none; color: #fff; padding: 8px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; white-space: nowrap; }
-.chat-input button:active { background: #2ea043; }
-.chat-input button:disabled { background: #484f58; }
-.chat-msg { font-size: 12px; padding: 6px 0; color: #8b949e; }
-.chat-msg.ok { color: #3fb950; }
-.chat-msg.err { color: #f85149; }
+.chat-log { flex: 1; overflow-y: auto; max-height: 300px; padding: 4px 0; }
+.bubble { max-width: 85%; padding: 8px 12px; border-radius: 12px; font-size: 12px; line-height: 1.4; margin-bottom: 6px; word-break: break-word; }
+.bubble.me { background: #238636; color: #fff; margin-left: auto; border-bottom-right-radius: 4px; }
+.bubble.bot { background: #30363d; color: #c9d1d9; margin-right: auto; border-bottom-left-radius: 4px; }
+.bubble .btime { font-size: 9px; opacity: .5; margin-top: 3px; }
+.bubble .bstatus { font-size: 9px; opacity: .6; margin-top: 2px; }
+.chat-bar { display: flex; gap: 6px; margin-top: 8px; }
+.chat-bar input { flex: 1; background: #0d1117; border: 1px solid #30363d; border-radius: 18px; padding: 8px 14px; color: #c9d1d9; font-size: 13px; outline: none; }
+.chat-bar input:focus { border-color: #58a6ff; }
+.chat-bar button { background: #238636; border: none; color: #fff; width: 36px; height: 36px; border-radius: 50%; font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.chat-bar button:active { background: #2ea043; }
 .chat-setup { font-size: 11px; color: #484f58; margin-top: 8px; }
 .chat-setup input { width: 100%; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 6px 8px; color: #c9d1d9; font-size: 11px; margin-top: 4px; outline: none; }
 .chat-setup button { background: #30363d; border: none; color: #c9d1d9; padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-top: 4px; }
@@ -99,7 +101,7 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 </head>
 <body>
 <div class="hdr">
-  <h1><span class="dot" id="dot"></span>🚀 업비트 자동매매 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.1.3</span></h1>
+  <h1><span class="dot" id="dot"></span>🚀 업비트 자동매매 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.1.4</span></h1>
   <div><span class="tm" id="tm"></span> <span class="menu-btn" onclick="toggleMenu()">☰</span></div>
 </div>
 <div id="overlay" class="overlay" onclick="toggleMenu()"></div>
@@ -108,13 +110,13 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
   <h3>AutoTune 개선 로그</h3>
   <div id="logList"></div>
   <div class="chat-wrap">
-    <h3>💬 개선 요청</h3>
+    <h3>💬 채팅</h3>
     <div id="chatArea">
-      <div class="chat-input">
-        <input id="chatMsg" placeholder="요청사항 입력..." onkeydown="if(event.key==='Enter')sendChat()">
-        <button onclick="sendChat()">전송</button>
+      <div class="chat-log" id="chatLog"></div>
+      <div class="chat-bar">
+        <input id="chatMsg" placeholder="메시지 입력..." onkeydown="if(event.key==='Enter')sendChat()">
+        <button onclick="sendChat()">↑</button>
       </div>
-      <div id="chatStatus"></div>
     </div>
     <div id="chatSetup" style="display:none" class="chat-setup">
       <div>텔레그램 봇 토큰</div>
@@ -270,6 +272,20 @@ function render(d) {
   });
   html += '</table></div>';
 
+  // Coins (코인별 성적, 5개 + 더보기)
+  if (d.coins && d.coins.length > 0) {
+    html += '<div class="sec"><h2>코인별 성적</h2><table><tr><th>코인</th><th>거래</th><th>승률</th><th>손익</th></tr>';
+    d.coins.forEach((c, i) => {
+      const hide = i >= 5 ? ' style="display:none" class="coin-row"' : ' class="coin-row"';
+      html += `<tr${hide}><td>${c.coin}</td><td>${c.total}</td><td>${c.win_rate.toFixed(0)}%</td><td class="${pc(c.pnl)}">${ps(Math.round(c.pnl))}</td></tr>`;
+    });
+    html += '</table>';
+    if (d.coins.length > 5) {
+      html += `<div class="more-btn" onclick="showMoreCoins()">더보기 ▾</div>`;
+    }
+    html += '</div>';
+  }
+
   // Changelog → 사이드 패널로 이동
   if (d.changelog && d.changelog.length > 0) {
     let logHtml = '';
@@ -329,6 +345,15 @@ function showMoreLogs() {
   }
 }
 
+let coinShown = 5;
+function showMoreCoins() {
+  const rows = document.querySelectorAll('.coin-row');
+  const next = coinShown + 10;
+  rows.forEach((r, i) => { if (i < next) r.style.display = ''; });
+  coinShown = next;
+  if (coinShown >= rows.length) event.target.style.display = 'none';
+}
+
 function toggleDay(i) {
   const el = document.getElementById('dd' + i);
   if (el) el.classList.toggle('open');
@@ -356,10 +381,52 @@ function getTgConfig() {
   return (token && chatId) ? { token, chatId } : null;
 }
 
+function getChatHistory() {
+  try { return JSON.parse(localStorage.getItem('chat_history') || '[]'); } catch { return []; }
+}
+
+function saveChatHistory(h) {
+  // 최근 50개만 유지
+  localStorage.setItem('chat_history', JSON.stringify(h.slice(-50)));
+}
+
+function renderChat() {
+  const log = document.getElementById('chatLog');
+  const local = getChatHistory();
+  const remote = window._chatRemote || [];
+  // 로컬(내 메시지) + 리모트(봇 응답) 합쳐서 시간순 정렬
+  const all = [...local, ...remote].sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+  if (all.length === 0) {
+    log.innerHTML = '<div style="text-align:center;color:#484f58;font-size:11px;padding:20px 0">메시지를 보내보세요</div>';
+    return;
+  }
+  log.innerHTML = all.map(m => {
+    const cls = m.type === 'me' ? 'me' : 'bot';
+    const statusTxt = m.type === 'me' ? (m.status === 'sent' ? ' ✓' : m.status === 'fail' ? ' ✕' : ' ⏳') : '';
+    return `<div class="bubble ${cls}">${m.text}<div class="btime">${m.time}${statusTxt}</div></div>`;
+  }).join('');
+  log.scrollTop = log.scrollHeight;
+}
+
+// 봇 응답 폴링
+async function pollChat() {
+  try {
+    const r = await fetch('chat.json?t=' + Date.now());
+    if (r.ok) {
+      window._chatRemote = await r.json();
+      renderChat();
+    }
+  } catch {}
+}
+setInterval(pollChat, 15000);
+
 function initChat() {
   if (!getTgConfig()) {
     document.getElementById('chatArea').style.display = 'none';
     document.getElementById('chatSetup').style.display = 'block';
+  } else {
+    pollChat();
+    renderChat();
   }
 }
 
@@ -371,6 +438,7 @@ function saveTgConfig() {
   localStorage.setItem('tg_chat_id', chatId);
   document.getElementById('chatArea').style.display = 'block';
   document.getElementById('chatSetup').style.display = 'none';
+  renderChat();
 }
 
 async function sendChat() {
@@ -379,29 +447,29 @@ async function sendChat() {
   const input = document.getElementById('chatMsg');
   const msg = input.value.trim();
   if (!msg) return;
-  const status = document.getElementById('chatStatus');
-  input.disabled = true;
-  status.className = 'chat-msg';
-  status.textContent = '전송 중...';
+  input.value = '';
+
+  const now = new Date();
+  const time = `${now.getMonth()+1}/${now.getDate()} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+  const history = getChatHistory();
+  const entry = { type: 'me', text: msg, time, status: 'sending' };
+  history.push(entry);
+  saveChatHistory(history);
+  renderChat();
+
   try {
     const r = await fetch(`https://api.telegram.org/bot${cfg.token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: cfg.chatId, text: '📊 [대시보드 요청]\n' + msg })
+      body: JSON.stringify({ chat_id: cfg.chatId, text: '📊 [대시보드]\n' + msg })
     });
     const d = await r.json();
-    if (d.ok) {
-      status.className = 'chat-msg ok';
-      status.textContent = '✓ 전송 완료';
-      input.value = '';
-    } else {
-      throw new Error(d.description || 'failed');
-    }
-  } catch(e) {
-    status.className = 'chat-msg err';
-    status.textContent = '✕ 전송 실패: ' + e.message;
+    entry.status = d.ok ? 'sent' : 'fail';
+  } catch {
+    entry.status = 'fail';
   }
-  input.disabled = false;
+  saveChatHistory(history);
+  renderChat();
   input.focus();
 }
 
