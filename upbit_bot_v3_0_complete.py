@@ -3919,7 +3919,7 @@ class TradingBotV3:
             except Exception:
                 _tickers = []
 
-            # 1차 필터: 상승 중(+1.5%) + 거래대금 30억 이상
+            # 1차 필터: 상승 중(+3%) + 거래대금 50억 이상 (v5.7: 강화)
             pre_candidates = []
             for t in _tickers:
                 coin = t['market'].replace('KRW-', '')
@@ -3929,7 +3929,7 @@ class TradingBotV3:
                     continue
                 chg = t.get('signed_change_rate', 0)
                 trade_price = t.get('acc_trade_price_24h', 0)
-                if chg >= 0.015 and trade_price >= 3_000_000_000:
+                if chg >= 0.03 and trade_price >= 5_000_000_000:
                     pre_candidates.append((coin, chg, trade_price))
 
             # 상승률 순 상위 25개만 상세 분석
@@ -3966,8 +3966,8 @@ class TradingBotV3:
                     recent_vol = np.mean(volumes_5m[-2:])
                     vol_ratio = recent_vol / avg_vol if avg_vol > 0 else 0
 
-                    # 필수 조건: 10분 +1.5% 이상
-                    if price_change_10m < 0.015:
+                    # 필수 조건: 10분 +2.5% 이상 (v5.7: 1.5→2.5% 강화)
+                    if price_change_10m < 0.025:
                         # 10분 급등이 아니면 → 초기 급등(1시간봉) 체크로 넘김
                         pass
                     else:
@@ -4000,8 +4000,8 @@ class TradingBotV3:
                         if -0.02 <= pullback <= -0.005:
                             score += 3
 
-                        # 점수 문턱: 5점 이상
-                        if score < 5:
+                        # 점수 문턱: 7점 이상 (v5.7: 5→7 강화)
+                        if score < 7:
                             continue
 
                         # ── 펌프앤덤프 필터 (기존 유지) ──
@@ -4045,8 +4045,8 @@ class TradingBotV3:
                             vol_1h = ohlcv_1h['volume'].iloc[-1]
                             avg_vol_1h = ohlcv_1h['volume'].iloc[:-1].mean() if len(ohlcv_1h) > 1 else vol_1h
 
-                            # 1시간 +3% 이상 + 거래량 1.5배 + 아직 고점 근처
-                            if change_1h >= 0.03 and (avg_vol_1h <= 0 or vol_1h >= avg_vol_1h * 1.5):
+                            # 1시간 +5% 이상 + 거래량 2배 + 아직 고점 근처 (v5.7: 강화)
+                            if change_1h >= 0.05 and (avg_vol_1h <= 0 or vol_1h >= avg_vol_1h * 2.0):
                                 # 아직 고점 근처인지 (급등 초기 확인)
                                 if ohlcv_1h['close'].iloc[-1] >= ohlcv_1h['high'].iloc[-1] * 0.98:
                                     # 펌프앤덤프 필터
