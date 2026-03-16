@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>🚀 업비트 자동매매 봇 v1.1.5</title>
+<title>🚀 업비트 자동매매 봇 v1.1.6</title>
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -103,7 +103,7 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 </head>
 <body>
 <div class="hdr">
-  <h1><span class="dot" id="dot"></span>🚀 업비트 자동매매 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.1.5</span></h1>
+  <h1><span class="dot" id="dot"></span>🚀 업비트 자동매매 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.1.6</span></h1>
   <div><span class="tm" id="tm"></span> <span class="menu-btn" onclick="toggleMenu()">☰</span></div>
 </div>
 <div id="overlay" class="overlay" onclick="toggleMenu()"></div>
@@ -400,9 +400,21 @@ function renderChat(messages) {
     log.innerHTML = '<div style="text-align:center;color:#484f58;font-size:11px;padding:20px 0">메시지를 보내보세요</div>';
     return;
   }
-  log.innerHTML = messages.map(m => {
+  // ts 기준 정렬 (null은 맨 뒤로)
+  messages.sort((a, b) => {
+    const ta = a.ts ? (a.ts.seconds || 0) : (a._ts ? a._ts/1000 : 9999999999);
+    const tb = b.ts ? (b.ts.seconds || 0) : (b._ts ? b._ts/1000 : 9999999999);
+    return ta - tb;
+  });
+  log.innerHTML = messages.map((m, i) => {
     const cls = m.type === 'me' ? 'me' : 'bot';
-    return `<div class="bubble ${cls}">${m.text}<div class="btime">${m.time}</div></div>`;
+    let check = '';
+    if (m.type === 'me') {
+      // 내 메시지 뒤에 봇 응답이 있으면 읽음(✓✓), 전송만 됐으면 ✓
+      const hasReply = messages.slice(i + 1).some(x => x.type === 'bot');
+      check = hasReply ? ' ✓✓' : ' ✓';
+    }
+    return `<div class="bubble ${cls}">${m.text}<div class="btime">${m.time}${check}</div></div>`;
   }).join('');
   log.scrollTop = log.scrollHeight;
 }
@@ -444,7 +456,7 @@ async function sendChat() {
   const time = `${now.getMonth()+1}/${now.getDate()} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
 
   // Firebase에 저장 (즉시 표시)
-  await chatRef.add({ type: 'me', text: msg, time, ts: firebase.firestore.FieldValue.serverTimestamp() });
+  await chatRef.add({ type: 'me', text: msg, time, ts: firebase.firestore.FieldValue.serverTimestamp(), _ts: Date.now() });
 
   // 텔레그램으로도 전송 (봇이 처리하도록)
   try {

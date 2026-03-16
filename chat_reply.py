@@ -46,7 +46,8 @@ def _reply_rest(msg):
             "type": {"stringValue": "bot"},
             "text": {"stringValue": msg},
             "time": {"stringValue": now.strftime('%m/%d %H:%M')},
-            "ts": {"timestampValue": now.strftime('%Y-%m-%dT%H:%M:%S.000Z')}
+            "ts": {"timestampValue": now.strftime('%Y-%m-%dT%H:%M:%S.000Z')},
+            "_ts": {"integerValue": str(int(now.timestamp() * 1000))}
         }
     }
     r = requests.post(url, json=data, timeout=10)
