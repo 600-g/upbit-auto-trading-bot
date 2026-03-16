@@ -3097,11 +3097,14 @@ class TradingBotV3:
         if market_strength == "극약세":
             print("⚠️ 극약세 시장 → 개별 강세 코인만 선별 진입")
 
-        # v5.5: 심야(23~05시) 모멘텀 기준 강화 (차단 아님, 확실한 것만 진입)
+        # v5.7: 저녁+심야(18~06시) 모멘텀 기준 강화
         _cur_hour = datetime.now().hour
         if _cur_hour >= 23 or _cur_hour < 6:
-            min_score = min(min_score + 8, 35)  # +8점 가산
+            min_score = min(min_score + 10, 35)  # 심야: +10점 (v5.7: 8→10)
             print(f"🌙 심야({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
+        elif _cur_hour >= 18:
+            min_score = min(min_score + 5, 30)  # 저녁: +5점 (v5.7 신규)
+            print(f"🌆 저녁({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
         # v5.6: AutoTune 시간대 부스트 (새벽 등 전패 구간 자동 감지)
         _time_boost = getattr(self, '_autotune_time_boost', {})
         if _time_boost:
@@ -4348,15 +4351,22 @@ class TradingBotV3:
             coin = target['coin']
             price = target['price']
 
-            # v5.4: 야간(23~06시) 급등 기준 강화 — 점수 8+ 필요, 예산 절반
+            # v5.7: 저녁+야간(18~06시) 급등 기준 강화
             _hour = datetime.now().hour
             _is_night = (_hour >= 23 or _hour < 6)
+            _is_evening = (18 <= _hour < 23)
             if _is_night:
-                if target.get('score', 0) < 8:
-                    print(f"🚀 [SURGE] {coin} 야간 점수 부족 ({target.get('score',0)}점 < 8점) → 패스")
+                if target.get('score', 0) < 9:
+                    print(f"🚀 [SURGE] {coin} 심야 점수 부족 ({target.get('score',0)}점 < 9점) → 패스")
                     return
                 surge_budget = surge_budget // 2
-                print(f"🌙 [SURGE] 야간 모드: 점수 {target.get('score',0)}점 ≥ 8 OK, 예산 절반 {surge_budget:,}원")
+                print(f"🌙 [SURGE] 심야 모드: 점수 {target.get('score',0)}점 ≥ 9 OK, 예산 절반 {surge_budget:,}원")
+            elif _is_evening:
+                if target.get('score', 0) < 8:
+                    print(f"🚀 [SURGE] {coin} 저녁 점수 부족 ({target.get('score',0)}점 < 8점) → 패스")
+                    return
+                surge_budget = int(surge_budget * 0.7)
+                print(f"🌆 [SURGE] 저녁 모드: 점수 {target.get('score',0)}점 ≥ 8 OK, 예산 70% {surge_budget:,}원")
 
             # v5.3: 즉시 매수 대신 눌림목 워치리스트에 추가
             if coin in self._surge_watchlist:
