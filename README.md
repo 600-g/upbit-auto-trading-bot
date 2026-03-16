@@ -1,6 +1,6 @@
-# 업비트 자동거래봇 v3.1
+# 업비트 자동거래봇 v5.7
 
-> 모멘텀 기반 암호화폐 자동 거래 봇
+> 모멘텀 기반 암호화폐 자동 거래 봇 + 실시간 대시보드
 
 ---
 
@@ -87,14 +87,22 @@ kill $(cat bot.pid)                                # 봇 종료
 
 ```
 업비트자동/
-├── upbit_bot_v3_0_complete.py   # 메인 코드
+├── upbit_bot_v3_0_complete.py   # 메인 봇 코드 (v5.7)
 ├── config.json                  # API 키 (chmod 600)
+├── export_status.py             # 대시보드 데이터 생성 + git push
+├── chat_reply.py                # 대시보드 채팅 응답 (Firebase)
+├── dashboard.py                 # Flask 로컬 대시보드 (localhost:5000)
+├── watchdog.sh                  # 봇 감시 + 텔레그램 알림
 ├── requirements.txt             # 패키지 목록
-├── GUIDE.md                     # 상세 가이드
-├── README.md                    # 이 파일
 ├── trading_bot_v3.db            # SQLite DB (자동 생성)
 ├── bot.pid                      # 프로세스 ID (자동 생성)
-├── bot.log                      # 실행 로그 (자동 생성)
+├── logs/                        # 실행 로그
+├── docs/                        # GitHub Pages 대시보드
+│   ├── index.html               # 대시보드 UI (v1.1.6)
+│   ├── status.json              # 봇 상태 데이터 (5분 갱신)
+│   ├── chat.json                # 채팅 히스토리
+│   ├── icon-192.png             # 앱 아이콘 (로켓)
+│   └── apple-touch-icon.png     # iOS 홈화면 아이콘
 └── trading_log_*.json           # 거래 로그 (자동 생성)
 ```
 
@@ -194,5 +202,16 @@ RSI (25%) +
 
 ---
 
-**버전:** v3.1
-**마지막 업데이트:** 2026-02-21
+## 대시보드
+
+**사이트:** https://600-g.github.io/upbit-auto-trading-bot/
+
+- 실시간 잔고, 승률, 포지션, 일별/월별/코인별 손익
+- 시장 지수 (BTC/ALT 등락 기반 5단계)
+- Firebase 실시간 채팅 (대시보드에서 봇과 대화)
+- iOS 홈화면 앱 지원 (로켓 아이콘)
+
+---
+
+**버전:** v5.7 (봇) / v1.1.6 (대시보드)
+**마지막 업데이트:** 2026-03-17
