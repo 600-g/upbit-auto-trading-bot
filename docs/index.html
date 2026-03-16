@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>🚀 업비트 자동매매 봇 v1.1.4</title>
+<title>🚀 업비트 자동매매 봇 v1.1.5</title>
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -98,10 +98,12 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 .mkt .info { flex: 1; font-size: 11px; color: #8b949e; }
 .mkt .coins { font-size: 11px; }
 </style>
+<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
 </head>
 <body>
 <div class="hdr">
-  <h1><span class="dot" id="dot"></span>🚀 업비트 자동매매 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.1.4</span></h1>
+  <h1><span class="dot" id="dot"></span>🚀 업비트 자동매매 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.1.5</span></h1>
   <div><span class="tm" id="tm"></span> <span class="menu-btn" onclick="toggleMenu()">☰</span></div>
 </div>
 <div id="overlay" class="overlay" onclick="toggleMenu()"></div>
@@ -374,60 +376,49 @@ function showMore() {
 load();
 setInterval(load, 30000);
 
-// 텔레그램 채팅
+// Firebase 채팅 (실시간)
+const fbApp = firebase.initializeApp({
+  apiKey: "AIzaSyAF6096bC-Q04qWXh5MjVsuJGhYBy76agM",
+  authDomain: "datemap-759bf.firebaseapp.com",
+  projectId: "datemap-759bf",
+  storageBucket: "datemap-759bf.firebasestorage.app",
+  messagingSenderId: "833273999923",
+  appId: "1:833273999923:web:2696d0363c223c6bbbe946"
+});
+const db = firebase.firestore();
+const chatRef = db.collection('upbit_chat');
+
 function getTgConfig() {
   const token = localStorage.getItem('tg_token');
   const chatId = localStorage.getItem('tg_chat_id');
   return (token && chatId) ? { token, chatId } : null;
 }
 
-function getChatHistory() {
-  try { return JSON.parse(localStorage.getItem('chat_history') || '[]'); } catch { return []; }
-}
-
-function saveChatHistory(h) {
-  // 최근 50개만 유지
-  localStorage.setItem('chat_history', JSON.stringify(h.slice(-50)));
-}
-
-function renderChat() {
+function renderChat(messages) {
   const log = document.getElementById('chatLog');
-  const local = getChatHistory();
-  const remote = window._chatRemote || [];
-  // 로컬(내 메시지) + 리모트(봇 응답) 합쳐서 시간순 정렬
-  const all = [...local, ...remote].sort((a, b) => (a.time || '').localeCompare(b.time || ''));
-  if (all.length === 0) {
+  if (!messages || messages.length === 0) {
     log.innerHTML = '<div style="text-align:center;color:#484f58;font-size:11px;padding:20px 0">메시지를 보내보세요</div>';
     return;
   }
-  log.innerHTML = all.map(m => {
+  log.innerHTML = messages.map(m => {
     const cls = m.type === 'me' ? 'me' : 'bot';
-    const statusTxt = m.type === 'me' ? (m.status === 'sent' ? ' ✓' : m.status === 'fail' ? ' ✕' : ' ⏳') : '';
-    return `<div class="bubble ${cls}">${m.text}<div class="btime">${m.time}${statusTxt}</div></div>`;
+    return `<div class="bubble ${cls}">${m.text}<div class="btime">${m.time}</div></div>`;
   }).join('');
   log.scrollTop = log.scrollHeight;
 }
 
-// 봇 응답 폴링
-async function pollChat() {
-  try {
-    const r = await fetch('chat.json?t=' + Date.now());
-    if (r.ok) {
-      window._chatRemote = await r.json();
-      renderChat();
-    }
-  } catch {}
-}
-setInterval(pollChat, 15000);
-
+// 실시간 리스너
 function initChat() {
   if (!getTgConfig()) {
     document.getElementById('chatArea').style.display = 'none';
     document.getElementById('chatSetup').style.display = 'block';
-  } else {
-    pollChat();
-    renderChat();
+    return;
   }
+  chatRef.orderBy('ts').limitToLast(50).onSnapshot(snap => {
+    const msgs = [];
+    snap.forEach(doc => msgs.push(doc.data()));
+    renderChat(msgs);
+  });
 }
 
 function saveTgConfig() {
@@ -438,7 +429,7 @@ function saveTgConfig() {
   localStorage.setItem('tg_chat_id', chatId);
   document.getElementById('chatArea').style.display = 'block';
   document.getElementById('chatSetup').style.display = 'none';
-  renderChat();
+  initChat();
 }
 
 async function sendChat() {
@@ -451,25 +442,18 @@ async function sendChat() {
 
   const now = new Date();
   const time = `${now.getMonth()+1}/${now.getDate()} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-  const history = getChatHistory();
-  const entry = { type: 'me', text: msg, time, status: 'sending' };
-  history.push(entry);
-  saveChatHistory(history);
-  renderChat();
 
+  // Firebase에 저장 (즉시 표시)
+  await chatRef.add({ type: 'me', text: msg, time, ts: firebase.firestore.FieldValue.serverTimestamp() });
+
+  // 텔레그램으로도 전송 (봇이 처리하도록)
   try {
-    const r = await fetch(`https://api.telegram.org/bot${cfg.token}/sendMessage`, {
+    await fetch(`https://api.telegram.org/bot${cfg.token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: cfg.chatId, text: '📊 [대시보드]\n' + msg })
     });
-    const d = await r.json();
-    entry.status = d.ok ? 'sent' : 'fail';
-  } catch {
-    entry.status = 'fail';
-  }
-  saveChatHistory(history);
-  renderChat();
+  } catch {}
   input.focus();
 }
 
