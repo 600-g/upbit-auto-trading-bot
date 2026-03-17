@@ -3097,14 +3097,18 @@ class TradingBotV3:
         if market_strength == "극약세":
             print("⚠️ 극약세 시장 → 개별 강세 코인만 선별 진입")
 
-        # v5.7: 저녁+심야(18~06시) 모멘텀 기준 강화
+        # v5.8: 시간대별 모멘텀 기준 강화 (DB 승률 데이터 기반)
+        # 심야(23~06): -246k 누적, 저녁(18~23): -58k, 오전(8~13): 8~10% 승률
         _cur_hour = datetime.now().hour
         if _cur_hour >= 23 or _cur_hour < 6:
-            min_score = min(min_score + 10, 35)  # 심야: +10점 (v5.7: 8→10)
+            min_score = min(min_score + 10, 35)  # 심야: +10점
             print(f"🌙 심야({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
         elif _cur_hour >= 18:
-            min_score = min(min_score + 5, 30)  # 저녁: +5점 (v5.7 신규)
+            min_score = min(min_score + 5, 30)  # 저녁: +5점
             print(f"🌆 저녁({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
+        elif 8 <= _cur_hour < 13:
+            min_score = min(min_score + 7, 32)  # v5.8 신규: 오전 +7점 (8시 8%승률, 11시 10%승률)
+            print(f"🌅 오전({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
         # v5.6: AutoTune 시간대 부스트 (새벽 등 전패 구간 자동 감지)
         _time_boost = getattr(self, '_autotune_time_boost', {})
         if _time_boost:
@@ -3268,9 +3272,9 @@ class TradingBotV3:
                 idle_coin = list(self._scalp_positions.keys())[0]
                 idle_mom = self.calculate_momentum(idle_coin)
                 new_mom = self.calculate_momentum(coin)
-                if new_mom > idle_mom + 5:
-                    # 새 모멘텀이 확실히 우위 → 중타 정리하고 전환
-                    print(f"💸 중타 {idle_coin}({idle_mom}점) < 신규 {coin}({new_mom}점) → 중타 정리 후 전환")
+                if new_mom > idle_mom + 15:
+                    # v5.8: 명확한 우위(+15점)일 때만 전환 (기존 +5점은 노이즈 수준)
+                    print(f"💸 중타 {idle_coin}({idle_mom}점) < 신규 {coin}({new_mom}점+15) → 중타 정리 후 전환")
                     self.scalp_clear_for_momentum()
                     available = self.current_balance
                 else:
@@ -4351,10 +4355,11 @@ class TradingBotV3:
             coin = target['coin']
             price = target['price']
 
-            # v5.7: 저녁+야간(18~06시) 급등 기준 강화
+            # v5.8: 시간대별 급등 기준 강화 (DB 승률 데이터 기반)
             _hour = datetime.now().hour
             _is_night = (_hour >= 23 or _hour < 6)
             _is_evening = (18 <= _hour < 23)
+            _is_morning = (8 <= _hour < 13)
             if _is_night:
                 if target.get('score', 0) < 9:
                     print(f"🚀 [SURGE] {coin} 심야 점수 부족 ({target.get('score',0)}점 < 9점) → 패스")
@@ -4367,6 +4372,13 @@ class TradingBotV3:
                     return
                 surge_budget = int(surge_budget * 0.7)
                 print(f"🌆 [SURGE] 저녁 모드: 점수 {target.get('score',0)}점 ≥ 8 OK, 예산 70% {surge_budget:,}원")
+            elif _is_morning:
+                # v5.8 신규: 오전 surge 기준 강화 (8시 0% 승률, 9시 31%)
+                if target.get('score', 0) < 8:
+                    print(f"🚀 [SURGE] {coin} 오전 점수 부족 ({target.get('score',0)}점 < 8점) → 패스")
+                    return
+                surge_budget = int(surge_budget * 0.6)
+                print(f"🌅 [SURGE] 오전 모드: 점수 {target.get('score',0)}점 ≥ 8 OK, 예산 60% {surge_budget:,}원")
 
             # v5.3: 즉시 매수 대신 눌림목 워치리스트에 추가
             if coin in self._surge_watchlist:
@@ -4391,6 +4403,11 @@ class TradingBotV3:
         """더 좋은 모멘텀 발견 시 중타 포지션 정리 (적당히 익절/손절 후 전환)"""
         for coin in list(self._scalp_positions.keys()):
             pos = self._scalp_positions[coin]
+            # v5.8: 최소 10분 보유 후에만 전환 허용 (0원 즉시매도 근절)
+            elapsed_min = (time.time() - pos['timestamp']) / 60
+            if elapsed_min < 10:
+                print(f"⏳ 중타 {coin} {elapsed_min:.0f}분 보유 — 최소 10분 미충족 → 전환 보류")
+                return
             price = self.get_price(coin)
             if price:
                 profit_rate = (price - pos['buy_price']) / pos['buy_price']
@@ -4480,6 +4497,9 @@ class TradingBotV3:
                     # -1.5% 즉시 손절
                     if profit_rate <= -0.015:
                         surge_sell = f"손절 {profit_rate*100:+.2f}%"
+                    # v5.8: 5분+ -1% 손절 추가 (기존: -1~-1.5% 구간 28건 -486k 방치)
+                    elif minutes_surge >= 5 and profit_rate <= -0.01:
+                        surge_sell = f"5분 손절 ({minutes_surge:.0f}분, {profit_rate*100:+.2f}%)"
                     # 10분+ 손실 시 타임아웃
                     elif minutes_surge >= 10 and profit_rate < 0:
                         surge_sell = f"타임아웃 손절 ({minutes_surge:.0f}분, {profit_rate*100:+.2f}%)"
@@ -4771,11 +4791,18 @@ class TradingBotV3:
                     elif hours >= 2.0:
                         # 2시간+ 횡보 + 모멘텀/거래량 약 → 더 좋은 코인 있으면 스왑, 없으면 정리
                         better = self._find_better_coin(coin, momentum)
+                        # v5.8: 포지션 슬롯 여유 있을 때만 스왑 (매도 후 매수 차단 방지)
+                        # 교체 후 남은 슬롯 = 현재 포지션 수 - 1(매도 예정) + 0(아직 미진입) → 항상 가능
+                        # 단, better 후보가 현 보유 종목이 아니어야 함
                         if better and better[0] not in self.positions:
                             print(f"🔄 {coin} {batch_id} 횡보 {hours:.1f}시간 ({profit_rate*100:+.2f}%) → {better[0]}({better[1]}점)으로 교체")
-                            if self.place_sell_order(coin, batch_id):
+                            sold = self.place_sell_order(coin, batch_id)
+                            if sold:
                                 time.sleep(2)
-                                self.place_buy_order(better[0], position['amount'], momentum=better[1])
+                                bought = self.place_buy_order(better[0], position['amount'], momentum=better[1])
+                                # v5.8: 매수 실패 시 쿨다운 설정 (재진입 차단 방지)
+                                if not bought:
+                                    print(f"  ⚠️ {better[0]} 매수 실패 → 자금 유지, {coin} 쿨다운 해제")
                             continue
                         elif hours >= 3.0:
                             # 3시간 넘으면 자금 묶임 방지 정리
