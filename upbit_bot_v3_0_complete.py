@@ -163,6 +163,16 @@ class TradingBotV3:
         self._autotune_rules = []        # 현재 활성 규칙 캐시
         self._autotune_blacklist = set() # 블랙리스트 캐시 (빠른 조회용)
 
+        # v5.9: DB 전패 코인 영구 블랙리스트 (SHIB 8전패, BEAM 5전패 등 실데이터 기반)
+        self._permanent_blacklist = {'SHIB', 'BEAM', 'TIA', 'BOUNTY', 'AXS', 'BSV'}
+
+        # v5.9: surge 연속 손실 보호 (2회 연속 손실 시 30분 중단)
+        self._surge_loss_streak = 0
+        self._surge_blocked_until = 0
+
+        # v5.9: 손실 비례 쿨다운용 마지막 매도 수익률 캐시
+        self._last_sell_pnl = {}  # {coin: profit_rate(%)} 매도 시 기록
+
         # v4.5: 동적 모멘텀 가중치 (AutoTune이 승패 분석으로 자동 조정)
         self._momentum_weights = {
             'vol': 0.20, 'rsi': 0.20, 'support': 0.13, 'price': 0.13,
@@ -2350,7 +2360,10 @@ class TradingBotV3:
     def _autotune_create_rules(self, rules):
         """분석 결과를 DB에 저장 (만료 정리 + 중복 방지)"""
         now = datetime.now()
-        expires = (now + __import__('datetime').timedelta(hours=24)).isoformat()
+        _td = __import__('datetime').timedelta
+        # v5.9: 규칙 유형별 만료 기간 차별화 (블랙리스트는 7일, 나머지는 48시간)
+        expires_blacklist = (now + _td(days=7)).isoformat()
+        expires = (now + _td(hours=48)).isoformat()
         now_iso = now.isoformat()
 
         try:
@@ -2377,15 +2390,18 @@ class TradingBotV3:
                     )
                     existing = cursor.fetchone()
 
+                    # v5.9: coin_blacklist는 7일 만료
+                    rule_expires = expires_blacklist if rule.get('rule_type') == 'coin_blacklist' else expires
+
                     if existing:
                         self.db.execute(
                             "UPDATE auto_tune_rules SET param_value = ?, reason = ?, expires_at = ? WHERE id = ?",
-                            (rule['param_value'], rule['reason'], expires, existing[0])
+                            (rule['param_value'], rule['reason'], rule_expires, existing[0])
                         )
                     else:
                         self.db.execute(
                             "INSERT INTO auto_tune_rules (rule_type, coin, param_key, param_value, reason, created_at, expires_at, active) VALUES (?,?,?,?,?,?,?,1)",
-                            (rule['rule_type'], rule['coin'], rule['param_key'], rule['param_value'], rule['reason'], now_iso, expires)
+                            (rule['rule_type'], rule['coin'], rule['param_key'], rule['param_value'], rule['reason'], now_iso, rule_expires)
                         )
                         active_count += 1
 
@@ -2824,6 +2840,11 @@ class TradingBotV3:
                 print(f"🤖 {coin} 매수 차단: AutoTune 블랙리스트")
                 return False
 
+            # v5.9: 영구 블랙리스트 (실데이터 기반 전패 코인)
+            if coin in self._permanent_blacklist:
+                print(f"🚫 {coin} 매수 차단: 영구 블랙리스트 (누적 전패 코인)")
+                return False
+
             # v4.3: 일일 재진입 카운터 리셋 (자정 넘기면)
             today = datetime.now().date()
             if self._daily_reset_date != today:
@@ -2905,6 +2926,7 @@ class TradingBotV3:
                 'surge_mode': getattr(self, '_current_buy_is_surge', False),
                 'sr_support': sr_at_entry['nearest_support'] if sr_at_entry else None,
                 'sr_resistance': sr_at_entry['nearest_resistance'] if sr_at_entry else None,
+                'momentum': momentum,  # v5.9: 진입 모멘텀 기록 (매도 시 DB 기록용)
             }
 
             # v4.3: 일일 매수 카운터 증가
@@ -2975,8 +2997,12 @@ class TradingBotV3:
                 'profit_rate': profit_rate,
                 'timestamp': datetime.now().isoformat()
             })
+            # v5.9: 진입 시 저장한 모멘텀 기록 (AutoTune 분석 정확도 개선)
+            _entry_momentum = position.get('momentum', 0)
+            self._last_sell_pnl[coin] = profit_rate  # 손실 비례 쿨다운용
             self._db_log_trade(coin, "sell", price, quantity, sell_amount,
-                               profit=profit, profit_rate=profit_rate, batch=batch_id)
+                               profit=profit, profit_rate=profit_rate,
+                               momentum=_entry_momentum, batch=batch_id)
 
             del self.positions[coin][batch_id]
 
@@ -3204,8 +3230,21 @@ class TradingBotV3:
                         absolute_ban = 900 if is_stoploss else 300  # idle/surge 손절: 15분, 일반: 5분
                         ban_label = f"15분({source}손절)" if is_stoploss else f"5분({source})"
                     else:
-                        absolute_ban = 1800 if is_stoploss else 900  # 손절: 30분, 일반: 15분
-                        ban_label = "30분(손절)" if is_stoploss else "15분"
+                        # v5.9: 손실 크기 비례 쿨다운 (재진입 반복 손실 방지)
+                        _loss_pct = abs(self._last_sell_pnl.get(coin, 0))
+                        if is_stoploss:
+                            if _loss_pct >= 1.0:
+                                absolute_ban = 3600   # -1%+ 손실: 60분
+                                ban_label = "60분(대손절)"
+                            elif _loss_pct >= 0.5:
+                                absolute_ban = 1800   # -0.5%+ 손실: 30분
+                                ban_label = "30분(손절)"
+                            else:
+                                absolute_ban = 900    # 소손실: 15분
+                                ban_label = "15분(소손절)"
+                        else:
+                            absolute_ban = 900        # 일반 매도: 15분
+                            ban_label = "15분"
                     # v4.4: AutoTune 쿨다운 연장
                     for _atr in self._autotune_rules:
                         if _atr['rule_type'] == 'cooldown_extend':
@@ -4320,6 +4359,14 @@ class TradingBotV3:
                     self._save_positions()
                     if profit_rate <= 0:
                         self._sell_cooldown[coin] = {'time': now, 'stoploss': True, 'source': 'surge', 'exit_price': price}
+                        # v5.9: surge 연속 손실 카운터 (2회 시 30분 진입 차단)
+                        self._surge_loss_streak = getattr(self, '_surge_loss_streak', 0) + 1
+                        if self._surge_loss_streak >= 2:
+                            self._surge_blocked_until = now + 1800
+                            print(f"🚨 [SURGE] 연속 {self._surge_loss_streak}회 손실 → 30분 진입 차단")
+                            self._notify(f"[SURGE 차단] 연속 {self._surge_loss_streak}회 손실 → 30분 중단")
+                    else:
+                        self._surge_loss_streak = 0  # 수익 시 초기화
                     continue
 
                 print(f"  🚀 [SURGE] {coin}: {profit_rate*100:+.2f}% | 고점 {peak_rate*100:+.2f}% | {elapsed_min:.0f}분")
@@ -4328,6 +4375,12 @@ class TradingBotV3:
             # v5.5: 급등 심야 기준 강화는 아래 야간 모드에서 처리 (점수 8+, 예산 절반)
 
             if len(self._surge_positions) >= self._surge_max:
+                return
+
+            # v5.9: surge 연속 손실 차단 체크
+            if now < getattr(self, '_surge_blocked_until', 0):
+                remaining = int((self._surge_blocked_until - now) / 60)
+                print(f"🚨 [SURGE] 연속 손실 차단 중 (잔여 {remaining}분) → 신규 진입 중단")
                 return
 
             # 5분 쿨타임
