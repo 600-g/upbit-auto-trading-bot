@@ -3864,8 +3864,8 @@ class TradingBotV3:
             if idle_budget < 10000:
                 return
 
-            # 이미 보유 중인 코인 제외
-            owned = set(self.positions.keys()) | set(self._scalp_positions.keys()) | set(self._sell_cooldown.keys())
+            # 이미 보유 중인 코인 + 블랙리스트 제외
+            owned = set(self.positions.keys()) | set(self._scalp_positions.keys()) | set(self._sell_cooldown.keys()) | self._permanent_blacklist | self._autotune_blacklist
 
             # 시장 상황별 중타 진입 기준
             market_state = getattr(self, 'last_market_state', '보통')
@@ -3953,6 +3953,8 @@ class TradingBotV3:
             cooldown_coins = set(self._sell_cooldown.keys())
             # v5.1: 같은 코인 2회 초과 진입 차단
             maxed_coins = {c for c, n in self._surge_coin_count.items() if n >= 2}
+            # v5.10: 영구+AutoTune 블랙리스트 적용 (SHIB 등 surge 경로 우회 방지)
+            _blacklist = self._permanent_blacklist | self._autotune_blacklist
             candidates = []
 
             # ── 1단계: ticker API로 전체 코인 1차 필터 (API 1회) ──
@@ -3970,6 +3972,8 @@ class TradingBotV3:
             for t in _tickers:
                 coin = t['market'].replace('KRW-', '')
                 if coin in owned or coin in cooldown_coins or coin in maxed_coins:
+                    continue
+                if coin in _blacklist:
                     continue
                 if hasattr(self, '_warning_coins') and coin in self._warning_coins:
                     continue
@@ -4046,6 +4050,54 @@ class TradingBotV3:
                         if -0.02 <= pullback <= -0.005:
                             score += 3
 
+                        # ── v5.10: 과매수/감속/고점 필터 (DB 분석 기반) ──
+
+                        # 1) RSI 과매수 필터: surge는 RSI 미참조였음 → 통합
+                        try:
+                            _rsi_ohlcv = pyupbit.get_ohlcv(ticker, interval="minute5", count=14)
+                            if _rsi_ohlcv is not None and len(_rsi_ohlcv) >= 7:
+                                _rsi_closes = list(_rsi_ohlcv['close'])
+                                _rsi_delta = np.diff(_rsi_closes)
+                                _rsi_gain = np.where(_rsi_delta > 0, _rsi_delta, 0).mean()
+                                _rsi_loss = np.where(_rsi_delta < 0, -_rsi_delta, 0).mean()
+                                _rsi_val = 100 - (100 / (1 + _rsi_gain / _rsi_loss)) if _rsi_loss > 0 else 99
+                                if _rsi_val >= 80:
+                                    print(f"  🚫 {coin} RSI {_rsi_val:.0f} ≥ 80 (과매수) → 차단")
+                                    continue
+                                elif _rsi_val >= 70:
+                                    score -= 3
+                                elif _rsi_val < 50:
+                                    score += 2
+                        except:
+                            pass
+
+                        # 2) 급등 감속 필터: 이전 봉 대비 현재 봉 상승률 절반 미만 → 꺾이는 중
+                        if len(closes_5m) >= 3 and opens_5m[-2] > 0 and opens_5m[-1] > 0:
+                            _prev_chg = (closes_5m[-2] - opens_5m[-2]) / opens_5m[-2]
+                            _curr_chg = (closes_5m[-1] - opens_5m[-1]) / opens_5m[-1]
+                            if _prev_chg > 0.005 and _curr_chg < _prev_chg * 0.5:
+                                print(f"  🚫 {coin} 급등 감속 (이전봉 +{_prev_chg*100:.1f}% → 현재봉 +{_curr_chg*100:.1f}%) → 차단")
+                                continue
+
+                        # 3) 24h 고점 대비 위치: 고점의 97%+ → 천장 근접 차단
+                        try:
+                            _24h = pyupbit.get_ohlcv(ticker, interval="minute60", count=24)
+                            if _24h is not None and len(_24h) >= 4:
+                                _24h_high = _24h['high'].max()
+                                if _24h_high > 0 and current_price >= _24h_high * 0.97:
+                                    print(f"  🚫 {coin} 24h 고점 근접 ({current_price:,.0f} ≥ {_24h_high:,.0f}×97%) → 차단")
+                                    continue
+                        except:
+                            pass
+
+                        # 4) 윗꼬리(매도압력) 필터: 마지막 5분봉 윗꼬리 비율 50%+
+                        _body = abs(closes_5m[-1] - opens_5m[-1])
+                        _upper_shadow = highs_5m[-1] - max(closes_5m[-1], opens_5m[-1])
+                        _total_range = highs_5m[-1] - min(closes_5m[-1], opens_5m[-1])
+                        if _total_range > 0 and _upper_shadow / _total_range >= 0.5:
+                            score -= 3
+                            print(f"  ⚠️ {coin} 윗꼬리 {_upper_shadow/_total_range*100:.0f}% (매도압력) → -3점")
+
                         # 점수 문턱: 7점 이상 (v5.7: 5→7 강화)
                         if score < 7:
                             continue
@@ -4071,6 +4123,12 @@ class TradingBotV3:
                         if recent_high > 0 and (current_price - recent_high) / recent_high < -0.02:
                             continue
 
+                        # 5) v5.10: 종합 모멘텀 게이트 (기존 모멘텀 미참조 → 통합)
+                        _surge_momentum = self.calculate_momentum(coin)
+                        if _surge_momentum < 30:
+                            print(f"  🚫 {coin} 종합 모멘텀 {_surge_momentum}점 < 30점 → 차단")
+                            continue
+
                         candidates.append({
                             'coin': coin,
                             'price': current_price,
@@ -4079,8 +4137,9 @@ class TradingBotV3:
                             'pullback': pullback,
                             'score': score,
                             'surge_type': 'rapid',
+                            'momentum': _surge_momentum,
                         })
-                        print(f"🚀 [SURGE 감지] {coin}: 10분 +{price_change_10m*100:.1f}%, 거래량 {vol_ratio:.1f}배, 점수 {score}점")
+                        print(f"🚀 [SURGE 감지] {coin}: 10분 +{price_change_10m*100:.1f}%, 거래량 {vol_ratio:.1f}배, 점수 {score}점, RSI/모멘텀 OK")
                         continue  # 10분 급등으로 이미 추가됨, 초기 급등 체크 불필요
 
                     # ── 3단계: 초기 급등 감지 (1시간봉 기준, 서서히 오르는 코인) ──
@@ -4101,6 +4160,11 @@ class TradingBotV3:
                                         continue
 
                                     vol_1h_ratio = vol_1h / avg_vol_1h if avg_vol_1h > 0 else 1
+                                    # v5.10: 초기급등도 모멘텀 게이트 적용
+                                    _early_mom = self.calculate_momentum(coin)
+                                    if _early_mom < 30:
+                                        print(f"  🚫 {coin} 초기급등 모멘텀 {_early_mom}점 < 30점 → 차단")
+                                        continue
                                     candidates.append({
                                         'coin': coin,
                                         'price': current_price,
@@ -4109,8 +4173,9 @@ class TradingBotV3:
                                         'pullback': 0,
                                         'score': 6,
                                         'surge_type': 'early',
+                                        'momentum': _early_mom,
                                     })
-                                    print(f"🚀 [SURGE 초기급등] {coin}: 1h +{change_1h*100:.1f}%, 거래량 {vol_1h_ratio:.1f}배, 고점 근처")
+                                    print(f"🚀 [SURGE 초기급등] {coin}: 1h +{change_1h*100:.1f}%, 거래량 {vol_1h_ratio:.1f}배, 모멘텀 {_early_mom}점")
                     except:
                         pass
 
