@@ -2782,7 +2782,7 @@ class TradingBotV3:
     # 3. 자동 매수/매도
     # ============================================
     
-    MAX_POSITIONS = 3  # 최대 동시 보유 코인 수 (v3.2: 섹터 분산 + 엄선)
+    MAX_POSITIONS = 2  # v5.12: 3→2 (확신 코인 집중, 건당 비중 확대)
 
     # 코인 섹터 분류 (동일 섹터 집중 방지)
     COIN_SECTORS = {
@@ -3133,8 +3133,12 @@ class TradingBotV3:
             min_score = min(min_score + 5, 30)  # 저녁: +5점
             print(f"🌆 저녁({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
         elif 8 <= _cur_hour < 13:
-            min_score = min(min_score + 7, 32)  # v5.8 신규: 오전 +7점 (8시 8%승률, 11시 10%승률)
+            min_score = min(min_score + 7, 32)  # v5.8: 오전 +7점 (8시 8%승률, 11시 10%승률)
             print(f"🌅 오전({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
+        elif 13 <= _cur_hour < 18:
+            # v5.12: 최고 시간대(13~18시) 기준 완화 — 승률 53~60%, +944k
+            min_score = max(min_score - 3, 10)  # -3점 완화
+            print(f"☀️ 오후({_cur_hour:02d}시) → 모멘텀 기준 완화: {min_score}점")
         # v5.6: AutoTune 시간대 부스트 (새벽 등 전패 구간 자동 감지)
         _time_boost = getattr(self, '_autotune_time_boost', {})
         if _time_boost:
@@ -3564,16 +3568,17 @@ class TradingBotV3:
                     price = self.get_price(coin)
                     if not price:
                         continue
-                    # 수익률 체크: +0.3% 이상
+                    # v5.12: 추가매수 조건 완화 (+0.3% → +0.1%, 상승추세 유지)
+                    # batch_2가 핵심 수익원 (+306k): 빠르게 추가매수 진입
                     avg_buy = sum(p['buy_price'] * p['quantity'] for p in self.positions[coin].values()) / sum(p['quantity'] for p in self.positions[coin].values())
                     profit_rate = (price - avg_buy) / avg_buy
-                    if profit_rate < 0.003:
+                    if profit_rate < 0.001:  # +0.1% (기존 +0.3%)
                         continue
                     if not self._is_uptrend(coin):
                         continue
                     mom = self.calculate_momentum(coin)
                     coin_invested = sum(p['amount'] for p in self.positions[coin].values())
-                    max_per_coin = int(MAX_TRADING_BUDGET * 0.7)  # 대안 없을 때 70%까지 허용
+                    max_per_coin = int(MAX_TRADING_BUDGET * 0.85)  # v5.12: 70→85% (집중 투자)
                     if coin_invested >= max_per_coin:
                         continue
                     add_amount = min(int(available * 0.5), max_per_coin - coin_invested)
@@ -4200,6 +4205,12 @@ class TradingBotV3:
         try:
             now = time.time()
 
+            # v5.12: surge 관찰 모드 (매수 안 하고 감지+로그만)
+            # batch가 일 +50~300k 수익인데 surge가 -538k 갉아먹는 구조 → 비활성화
+            _surge_observe_only = True
+
+            # 기존 포지션 모니터링은 유지 (이미 보유 중이면 관리)
+
             # ── v5.3: 눌림목 워치리스트 모니터링 ──
             for coin in list(self._surge_watchlist.keys()):
                 watch = self._surge_watchlist[coin]
@@ -4452,7 +4463,14 @@ class TradingBotV3:
                 print(f"  🚀 [SURGE] {coin}: {profit_rate*100:+.2f}% | 고점 {peak_rate*100:+.2f}% | {elapsed_min:.0f}분")
 
             # ── 신규 진입 ──
-            # v5.5: 급등 심야 기준 강화는 아래 야간 모드에서 처리 (점수 8+, 예산 절반)
+            # v5.12: surge 관찰 모드 — 감지는 하되 매수 안 함
+            if _surge_observe_only:
+                # 감지 로그만 남기기
+                surge_coins = self._detect_surge_coins()
+                if surge_coins:
+                    for sc in surge_coins[:2]:
+                        print(f"👁️ [SURGE 관찰] {sc['coin']}: +{sc['change_10m']*100:.1f}%, 점수 {sc['score']}점 (매수 안 함)")
+                return
 
             if len(self._surge_positions) >= self._surge_max:
                 return
@@ -4764,27 +4782,29 @@ class TradingBotV3:
                         self._trailing_peaks[trailing_key] = profit_rate
                         current_peak = profit_rate
                     # 모멘텀별 trail drop (고모멘텀 → 느슨하게, 더 오래 추적)
+                    # v5.12: 트레일링 확대 (수익 더 먹기, batch_2 수익 극대화)
+                    # 기존 -0.7~1.0% → -1.0~1.5%로 느슨하게
                     if momentum >= 70:
                         if current_peak >= 0.04:
-                            trail_drop = 0.008   # +4% 고점: -0.8% 하락 시 매도
+                            trail_drop = 0.012   # +4% 고점: -1.2% (기존 -0.8%)
                         elif current_peak >= 0.02:
-                            trail_drop = 0.010   # +2% 고점: -1.0% 하락 시 매도
+                            trail_drop = 0.015   # +2% 고점: -1.5% (기존 -1.0%)
                         else:
-                            trail_drop = 0.010
+                            trail_drop = 0.012
                     elif momentum >= 50:
                         if current_peak >= 0.03:
-                            trail_drop = 0.007   # +3% 고점: -0.7%
+                            trail_drop = 0.012   # +3% 고점: -1.2% (기존 -0.7%)
                         elif current_peak >= 0.015:
-                            trail_drop = 0.007
+                            trail_drop = 0.010   # (기존 -0.7%)
                         else:
-                            trail_drop = 0.007
+                            trail_drop = 0.010
                     else:
                         if current_peak >= 0.02:
-                            trail_drop = 0.005   # 저모멘텀: 기존 유지
+                            trail_drop = 0.008   # 저모멘텀: (기존 -0.5%)
                         elif current_peak >= 0.01:
-                            trail_drop = 0.006
+                            trail_drop = 0.008   # (기존 -0.6%)
                         else:
-                            trail_drop = 0.007
+                            trail_drop = 0.008
                     # v4.4: AutoTune 트레일링 조정
                     for _atr in self._autotune_rules:
                         if _atr['rule_type'] == 'trailing_adjust':
