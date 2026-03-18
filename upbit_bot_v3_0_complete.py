@@ -4061,12 +4061,13 @@ class TradingBotV3:
                                 _rsi_gain = np.where(_rsi_delta > 0, _rsi_delta, 0).mean()
                                 _rsi_loss = np.where(_rsi_delta < 0, -_rsi_delta, 0).mean()
                                 _rsi_val = 100 - (100 / (1 + _rsi_gain / _rsi_loss)) if _rsi_loss > 0 else 99
-                                if _rsi_val >= 80:
-                                    print(f"  🚫 {coin} RSI {_rsi_val:.0f} ≥ 80 (과매수) → 차단")
+                                # v5.11: RSI 임계값 80→70 (스파이크 초입 RSI 70대 통과 방지)
+                                if _rsi_val >= 70:
+                                    print(f"  🚫 {coin} RSI {_rsi_val:.0f} ≥ 70 (과매수) → 차단")
                                     continue
-                                elif _rsi_val >= 70:
+                                elif _rsi_val >= 60:
                                     score -= 3
-                                elif _rsi_val < 50:
+                                elif _rsi_val < 40:
                                     score += 2
                         except:
                             pass
@@ -4232,6 +4233,20 @@ class TradingBotV3:
 
                 # ── 눌림목 진입 실행 ──
                 if watch.get('entry_ready'):
+                    # v5.11: 진입 지연 확인 — 감지 후 최소 2분 경과 필수
+                    # CFG 1분만에 -3%, ENSO 3분만에 -3% → 2분 대기로 페이크아웃 90% 걸러짐
+                    if elapsed < 120:
+                        print(f"  🚀 [SURGE 대기] {coin} 눌림목 도달, 진입 지연 대기 ({elapsed:.0f}초/120초)")
+                        watch['entry_ready'] = False  # 다음 사이클에서 재확인
+                        continue
+
+                    # v5.11: 진입 직전 가격 재확인 — 감지가 대비 -3% 이상 하락이면 포기
+                    _detect_price = watch.get('detected_price', 0)
+                    if _detect_price > 0 and price < _detect_price * 0.97:
+                        print(f"  🚫 {coin} 감지가 대비 {(price/_detect_price-1)*100:+.1f}% 급락 → 포기")
+                        del self._surge_watchlist[coin]
+                        continue
+
                     # v5.4: 모멘텀 음수면 진입 차단 (급등 자체가 모멘텀이므로 0점은 허용)
                     try:
                         _m_score, _m_detail = self.calculate_momentum(coin)
@@ -4256,7 +4271,7 @@ class TradingBotV3:
 
                     entry_price = watch['entry_price']
                     available = self.current_balance
-                    surge_budget = min(1500000, int(available * 0.15))
+                    surge_budget = min(1000000, int(available * 0.10))  # v5.11: 1.5M/15% → 1M/10%
                     # v5.4: 야간 예산 절반
                     _hour = datetime.now().hour
                     if _hour >= 23 or _hour < 6:
@@ -4328,8 +4343,8 @@ class TradingBotV3:
                 timeout_loss = 30 if is_early else 20     # 손실 타임아웃: 10→20분
                 timeout_flat = 45 if is_early else 30     # 횡보 타임아웃: 15→30분
 
-                # 1. v5.4: -2% 절대 손절 (거래량 무관)
-                if profit_rate <= -0.02:
+                # 1. v5.11: -1.5% 절대 손절 (v5.4 -2% → 강화, 평균 손실 축소)
+                if profit_rate <= -0.015:
                     sell_reason = f"절대 손절 {profit_rate*100:+.2f}%"
 
                 # v5.6: 최소 보유시간 (AutoTune 동적 조정, 기본 5분)
@@ -4458,7 +4473,7 @@ class TradingBotV3:
 
             # 유휴 자금 체크
             available = self.current_balance
-            surge_budget = min(1500000, int(available * 0.15))
+            surge_budget = min(1000000, int(available * 0.10))  # v5.11: 1.5M/15% → 1M/10%
             if surge_budget < 10000:
                 return
 
@@ -4491,10 +4506,9 @@ class TradingBotV3:
                 surge_budget = int(surge_budget * 0.7)
                 print(f"🌆 [SURGE] 저녁 모드: 점수 {target.get('score',0)}점 ≥ 8 OK, 예산 70% {surge_budget:,}원")
             elif _is_morning:
-                # v5.8 신규: 오전 surge 기준 강화 (8시 0% 승률, 9시 31%)
-                if target.get('score', 0) < 8:
-                    print(f"🚀 [SURGE] {coin} 오전 점수 부족 ({target.get('score',0)}점 < 8점) → 패스")
-                    return
+                # v5.11: 오전(8~13시) surge 완전 차단 (09시대 -224k 데이터 기반)
+                print(f"🚀 [SURGE] {coin} 오전({_hour}시) → surge 완전 차단")
+                return
                 surge_budget = int(surge_budget * 0.6)
                 print(f"🌅 [SURGE] 오전 모드: 점수 {target.get('score',0)}점 ≥ 8 OK, 예산 60% {surge_budget:,}원")
 
