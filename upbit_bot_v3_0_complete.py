@@ -2643,7 +2643,7 @@ class TradingBotV3:
             elif rule_name.startswith('coin_ban_'):
                 coin = rule_name.replace('coin_ban_', '')
                 if coin not in self._autotune_blacklist:
-                    self._autotune_blacklist.append(coin)
+                    self._autotune_blacklist.add(coin)
                     print(f"   ✅ 적용: {coin} 블랙리스트 추가")
             elif rule_name.startswith('hold_'):
                 # 보유시간 관련 → 최소 보유시간 확대
