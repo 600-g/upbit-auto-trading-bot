@@ -164,7 +164,9 @@ class TradingBotV3:
         self._autotune_blacklist = set() # 블랙리스트 캐시 (빠른 조회용)
 
         # v5.9: DB 전패 코인 영구 블랙리스트 (SHIB 8전패, BEAM 5전패 등 실데이터 기반)
-        self._permanent_blacklist = {'SHIB', 'BEAM', 'TIA', 'BOUNTY', 'AXS', 'BSV', 'CFG', 'ANKR'}  # v5.13: CFG(-220k누적), ANKR 추가
+        # v5.14: 영구 블랙리스트 폐지 → AutoTune 동적 블랙리스트(7일 만료)로 통합
+        # 코인 자체가 나쁜 게 아니라 진입 타이밍이 나쁜 것
+        self._permanent_blacklist = set()  # 비어있음 (동적 관리로 전환)
 
         # v5.9: surge 연속 손실 보호 (2회 연속 손실 시 30분 중단)
         self._surge_loss_streak = 0
@@ -3419,8 +3421,8 @@ class TradingBotV3:
 
                     signal_count = len(signals)
 
-                    # v5.4: 모멘텀 30+ 시그널 1개 허용, 그 외 2개 필요
-                    min_signals = 1 if momentum >= 30 else 2
+                    # v5.14: 모멘텀 40+ 집중 (데이터: 40+ 승률58%+235k, 30-40 33%-70k)
+                    min_signals = 1 if momentum >= 40 else 2
                     if signal_count < min_signals:
                         print(f" ⚠️ 시그널 {signal_count}개({', '.join(signals) if signals else '없음'}) → {min_signals}개 이상 필요, 매수 보류")
                         continue
@@ -4906,6 +4908,13 @@ class TradingBotV3:
                     mini_trail_key = f"{coin}_{batch_id}_mini_peak"
                     if hasattr(self, '_mini_trail_peaks') and mini_trail_key in self._mini_trail_peaks:
                         del self._mini_trail_peaks[mini_trail_key]
+
+                # === v5.14: 15분 횡보 조기 정리 (데이터: 15분+ 승률 급감, 5-15분이 최적) ===
+                if 0.25 <= hours < 0.5 and abs(profit_rate) < 0.003 and momentum < 35 and not uptrend:
+                    print(f"⏰ {coin} {batch_id} 15분 횡보(±0.3% 미만) + 모멘텀{momentum:.0f}점↓ → 조기 정리")
+                    self.place_sell_order(coin, batch_id)
+                    self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False, 'early_exit': True, 'exit_price': price}
+                    continue
 
                 # === 3.4 v5.6: 30분+ 수익 미도달 정리 — 손실 중(-0.5%+)만 ===
                 # 원칙: 0% 이상이면 절대 팔지 않음
