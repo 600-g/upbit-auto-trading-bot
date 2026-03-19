@@ -164,7 +164,7 @@ class TradingBotV3:
         self._autotune_blacklist = set() # 블랙리스트 캐시 (빠른 조회용)
 
         # v5.9: DB 전패 코인 영구 블랙리스트 (SHIB 8전패, BEAM 5전패 등 실데이터 기반)
-        self._permanent_blacklist = {'SHIB', 'BEAM', 'TIA', 'BOUNTY', 'AXS', 'BSV'}
+        self._permanent_blacklist = {'SHIB', 'BEAM', 'TIA', 'BOUNTY', 'AXS', 'BSV', 'CFG', 'ANKR'}  # v5.13: CFG(-220k누적), ANKR 추가
 
         # v5.9: surge 연속 손실 보호 (2회 연속 손실 시 30분 중단)
         self._surge_loss_streak = 0
@@ -3127,8 +3127,10 @@ class TradingBotV3:
         # 심야(23~06): -246k 누적, 저녁(18~23): -58k, 오전(8~13): 8~10% 승률
         _cur_hour = datetime.now().hour
         if _cur_hour >= 23 or _cur_hour < 6:
-            min_score = min(min_score + 10, 35)  # 심야: +10점
-            print(f"🌙 심야({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
+            # v5.13: 심야 batch 신규 진입 차단 (ANKR 04시 -35k 등 방어)
+            # 기존 포지션 모니터링은 유지, 신규 매수만 차단
+            print(f"🌙 심야({_cur_hour:02d}시) → batch 신규 진입 차단 (포지션 관리만)")
+            return
         elif _cur_hour >= 18:
             min_score = min(min_score + 5, 30)  # 저녁: +5점
             print(f"🌆 저녁({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
