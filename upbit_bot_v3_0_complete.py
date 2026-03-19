@@ -2832,6 +2832,11 @@ class TradingBotV3:
                 print(f"🚫 {coin} 매수 차단: 이미 {len(self.positions)}종목 보유 (최대 {self.MAX_POSITIONS}종목)")
                 return False
 
+            # v5.15: 심야(23~06시) 모든 경로 매수 차단 (횡보교체/2차매수 포함)
+            if getattr(self, '_nighttime_no_buy', False):
+                print(f"🌙 {coin} 매수 차단: 심야 시간대 (포지션 관리만)")
+                return False
+
             # ★ 투자유의/거래종료 종목 절대 금지
             if hasattr(self, '_warning_coins') and coin in self._warning_coins:
                 print(f"🚫 {coin} 매수 차단: 투자유의/거래종료 예정 종목")
@@ -3030,6 +3035,12 @@ class TradingBotV3:
         # v4.4: 사이클 시작 시 AutoTune 규칙 캐시 갱신
         self._autotune_apply_rules()
 
+        # v5.15: 심야(23~06시) 신규 매수 플래그 (포지션 관리는 유지)
+        _cur_hour_cycle = datetime.now().hour
+        self._nighttime_no_buy = (_cur_hour_cycle >= 23 or _cur_hour_cycle < 6)
+        if self._nighttime_no_buy:
+            print(f"🌙 심야({_cur_hour_cycle:02d}시) → 포지션 관리만, 신규 매수 차단")
+
         # 포지션 모니터링
         self.monitor_positions()
 
@@ -3129,9 +3140,8 @@ class TradingBotV3:
         # 심야(23~06): -246k 누적, 저녁(18~23): -58k, 오전(8~13): 8~10% 승률
         _cur_hour = datetime.now().hour
         if _cur_hour >= 23 or _cur_hour < 6:
-            # v5.13: 심야 batch 신규 진입 차단 (ANKR 04시 -35k 등 방어)
-            # 기존 포지션 모니터링은 유지, 신규 매수만 차단
-            print(f"🌙 심야({_cur_hour:02d}시) → batch 신규 진입 차단 (포지션 관리만)")
+            # v5.15: 심야 차단은 place_buy_order에서 처리, 여기서도 코인 스캔 생략
+            print(f"🌙 심야({_cur_hour:02d}시) → 코인 스캔/진입 생략 (포지션 관리만)")
             return
         elif _cur_hour >= 18:
             min_score = min(min_score + 5, 30)  # 저녁: +5점
