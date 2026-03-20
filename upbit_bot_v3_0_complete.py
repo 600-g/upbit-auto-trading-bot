@@ -204,7 +204,7 @@ class TradingBotV3:
         """SQLite 데이터베이스 초기화"""
         db_path = os.path.join(os.path.dirname(__file__), "trading_bot_v3.db")
         self._db_lock = threading.Lock()
-        self._trade_lock = threading.Lock()  # v4.2: 포지션/잔고 동시 접근 보호 (텔레그램 /sell vs 메인루프)
+        self._trade_lock = threading.RLock()  # v5.17: Lock→RLock (place_buy/sell 내부 lock + 외부 lock 데드락 방지)
         self.db = sqlite3.connect(db_path, check_same_thread=False)
         self.db.execute("""CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2821,6 +2821,11 @@ class TradingBotV3:
 
     def place_buy_order(self, coin, amount, momentum=0):
         """매수 주문 (최대 3종목 제한 포함)"""
+        # v5.17: _trade_lock 적용 (텔레그램/동시 실행 race condition 방지)
+        with self._trade_lock:
+            return self._place_buy_order_inner(coin, amount, momentum)
+
+    def _place_buy_order_inner(self, coin, amount, momentum=0):
         try:
             # ★ 텔레그램 /pause 상태면 매수 차단
             if getattr(self, '_tg_paused', False):
@@ -2956,6 +2961,11 @@ class TradingBotV3:
     
     def place_sell_order(self, coin, batch_id):
         """배치별 매도"""
+        # v5.17: _trade_lock 적용
+        with self._trade_lock:
+            return self._place_sell_order_inner(coin, batch_id)
+
+    def _place_sell_order_inner(self, coin, batch_id):
         try:
             if coin not in self.positions or batch_id not in self.positions[coin]:
                 return False
@@ -2972,25 +2982,42 @@ class TradingBotV3:
             profit_rate = (profit / position['amount']) * 100
 
             if self.mode == "real" and self.upbit:
-                # 실제 보유량 확인
-                real_qty = self.upbit.get_balance(coin)
-                if real_qty is None or float(real_qty) <= 0:
-                    print(f"⚠️ {coin} 실제 보유량 없음, 포지션 정리")
+                # v5.17: 실제 보유량 2회 확인 (매도 직전 재검증)
+                real_qty = float(self.upbit.get_balance(coin) or 0)
+                if real_qty <= 0:
+                    print(f"⚠️ {coin} 실제 보유량 없음, 포지션 DB 정리")
                     del self.positions[coin][batch_id]
                     if not self.positions[coin]:
                         del self.positions[coin]
                     self._save_positions()
                     return False
-                # 보유량이 기록보다 적으면 실제 보유량만큼만 매도
-                sell_qty = min(quantity, float(real_qty))
+                # 다른 배치 보유량 차감 (이 배치만 매도)
+                other_qty = sum(p['quantity'] for bid, p in self.positions[coin].items() if bid != batch_id)
+                available_qty = real_qty - other_qty
+                if available_qty <= 0:
+                    print(f"⚠️ {coin} {batch_id} 가용 수량 없음 (실제{real_qty:.4f} - 타배치{other_qty:.4f}), 포지션 정리")
+                    del self.positions[coin][batch_id]
+                    if not self.positions[coin]:
+                        del self.positions[coin]
+                    self._save_positions()
+                    return False
+                sell_qty = min(quantity, available_qty)
                 result = self.upbit.sell_market_order(f"KRW-{coin}", sell_qty)
                 if result is None or (isinstance(result, dict) and 'error' in result):
                     error_msg = result.get('error', {}).get('message', '알 수 없음') if isinstance(result, dict) else '응답 없음'
                     print(f"❌ {coin} 매도 실패: {error_msg}")
                     return False
-                print(f"📤 {coin} 매도 주문 전송: {result.get('uuid', '')}")
+                print(f"📤 {coin} 매도 주문 전송: {result.get('uuid', '')} (수량 {sell_qty:.4f})")
                 time.sleep(3)
-                self.current_balance = self._get_krw_balance()
+                # v5.17: 잔고 갱신 실패 대비 retry
+                for _retry in range(3):
+                    try:
+                        self.current_balance = self._get_krw_balance()
+                        break
+                    except:
+                        time.sleep(1)
+                        if _retry == 2:
+                            print(f"⚠️ 잔고 갱신 실패 — 다음 사이클에서 재시도")
             else:
                 self.current_balance += sell_amount
 
@@ -4334,7 +4361,16 @@ class TradingBotV3:
                             del self._surge_watchlist[coin]
                             continue
                         time.sleep(2)
-                        self.current_balance = self._get_krw_balance()
+                        # v5.17: 잔고 갱신 실패 대비 retry
+                        for _retry in range(3):
+                            try:
+                                self.current_balance = self._get_krw_balance()
+                                break
+                            except:
+                                time.sleep(1)
+                                if _retry == 2:
+                                    print(f"⚠️ surge 잔고 갱신 실패 — fallback")
+                                    self.current_balance -= surge_budget
                         real_qty = float(self.upbit.get_balance(coin) or 0)
                         prev_qty = 0
                         if coin in self.positions:
