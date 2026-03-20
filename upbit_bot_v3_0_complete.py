@@ -3491,6 +3491,19 @@ class TradingBotV3:
                             continue
                 except:
                     pass
+
+                # v5.16: 직전 5분 가격변동 확인 (0% 매도 근절 — 움직이지 않는 코인 차단)
+                try:
+                    _recent = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute1", count=5)
+                    if _recent is not None and len(_recent) >= 5:
+                        _5m_chg = (_recent['close'].iloc[-1] - _recent['close'].iloc[0]) / _recent['close'].iloc[0]
+                        _bullish = sum(1 for _, r in _recent.iterrows() if r['close'] > r['open'])
+                        if abs(_5m_chg) < 0.001 and _bullish < 3:
+                            print(f" ⚠️ {coin} 직전 5분 정체 ({_5m_chg*100:+.2f}%, 양봉{_bullish}/5) → 패스")
+                            continue
+                except:
+                    pass
+
                 print(f" ✅ 매수 (1차: {buy_amount:,}원)")
                 # 1차 매수 (코인당 할당의 50%)
                 self._current_buy_is_strong = coin_is_strong
@@ -4224,6 +4237,12 @@ class TradingBotV3:
             _surge_observe_only = True
 
             # 기존 포지션 모니터링은 유지 (이미 보유 중이면 관리)
+
+            # v5.16: 관찰모드면 워치리스트 즉시 비움 (DB 복원 우회 방지)
+            if _surge_observe_only and self._surge_watchlist:
+                print(f"👁️ [SURGE 관찰] 워치리스트 {len(self._surge_watchlist)}건 폐기 (관찰모드)")
+                self._surge_watchlist.clear()
+                self._save_positions()
 
             # ── v5.3: 눌림목 워치리스트 모니터링 ──
             for coin in list(self._surge_watchlist.keys()):
