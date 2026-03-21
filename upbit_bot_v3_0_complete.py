@@ -4688,13 +4688,15 @@ class TradingBotV3:
 
                 # ★ 빠른 컷 (완화): 1분 내 -1.5% 급락 즉시컷, 5분 내 -1.0% 빠른컷
                 minutes_held = hours * 60
-                if minutes_held <= 1 and profit_rate <= -0.015:
-                    print(f"✂️ {coin} {batch_id} 급락 즉시컷 ({minutes_held:.0f}분 보유, {profit_rate*100:+.2f}% ≤ -1.5%)")
+                # v5.19: 빠른 컷 완화 (데이터: 손실 24%가 1시간 내 회복, ANKR -1.23%→+2.71%)
+                # 기존: 1분 -1.5%, 5분 -1.0% → 완화: 1분 -2.0%, 5분 -1.5%
+                if minutes_held <= 1 and profit_rate <= -0.02:
+                    print(f"✂️ {coin} {batch_id} 급락 즉시컷 ({minutes_held:.0f}분, {profit_rate*100:+.2f}% ≤ -2.0%)")
                     self.place_sell_order(coin, batch_id)
                     self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': True, 'exit_price': price}
                     continue
-                elif minutes_held <= 5 and profit_rate <= -0.01:
-                    print(f"✂️ {coin} {batch_id} 빠른 컷 ({minutes_held:.0f}분 보유, {profit_rate*100:+.2f}% ≤ -1.0%)")
+                elif minutes_held <= 5 and profit_rate <= -0.015:
+                    print(f"✂️ {coin} {batch_id} 빠른 컷 ({minutes_held:.0f}분, {profit_rate*100:+.2f}% ≤ -1.5%)")
                     self.place_sell_order(coin, batch_id)
                     self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': True, 'exit_price': price}
                     continue
@@ -4794,7 +4796,9 @@ class TradingBotV3:
                             del self._collapse_count[collapse_key]
 
                 # === 1-2. 모멘텀 급락 + 수익 있음 → 수익 확보 매도 ===
-                if momentum < 30 and profit_rate >= 0.005:
+                # v5.19: 기준 완화 (모멘텀 30→20, 수익 0.5%→1.0%)
+                # 데이터: 수익 21%가 조기매도, 모멘텀 일시 하락 후 재상승 케이스 많음
+                if momentum < 20 and profit_rate >= 0.01:
                     print(f"⚡ {coin} {batch_id} 모멘텀 급락({momentum}점) → 수익 확보 ({profit_rate*100:+.2f}%)")
                     self.place_sell_order(coin, batch_id)
                     self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False}
@@ -4851,29 +4855,29 @@ class TradingBotV3:
                         self._trailing_peaks[trailing_key] = profit_rate
                         current_peak = profit_rate
                     # 모멘텀별 trail drop (고모멘텀 → 느슨하게, 더 오래 추적)
-                    # v5.12: 트레일링 확대 (수익 더 먹기, batch_2 수익 극대화)
-                    # 기존 -0.7~1.0% → -1.0~1.5%로 느슨하게
+                    # v5.19: 트레일링 추가 확대 (데이터: 수익 21%가 조기매도, 평균 +1.86% 놓침)
+                    # GLM +0.89%→+7.14%, ORDER +1.92%→+3.95%, G +2.72%→+5.76%
                     if momentum >= 70:
-                        if current_peak >= 0.04:
-                            trail_drop = 0.012   # +4% 고점: -1.2% (기존 -0.8%)
-                        elif current_peak >= 0.02:
-                            trail_drop = 0.015   # +2% 고점: -1.5% (기존 -1.0%)
+                        if current_peak >= 0.05:
+                            trail_drop = 0.012   # +5% 고점: -1.2%
+                        elif current_peak >= 0.03:
+                            trail_drop = 0.015   # +3% 고점: -1.5%
                         else:
-                            trail_drop = 0.012
+                            trail_drop = 0.018   # 초기 상승: -1.8% (넓게 잡아 큰 수익 기회)
                     elif momentum >= 50:
                         if current_peak >= 0.03:
-                            trail_drop = 0.012   # +3% 고점: -1.2% (기존 -0.7%)
+                            trail_drop = 0.015   # +3%: -1.5%
                         elif current_peak >= 0.015:
-                            trail_drop = 0.010   # (기존 -0.7%)
+                            trail_drop = 0.012   # +1.5%: -1.2%
                         else:
-                            trail_drop = 0.010
+                            trail_drop = 0.012
                     else:
                         if current_peak >= 0.02:
-                            trail_drop = 0.008   # 저모멘텀: (기존 -0.5%)
+                            trail_drop = 0.010   # 저모멘텀: -1.0%
                         elif current_peak >= 0.01:
-                            trail_drop = 0.008   # (기존 -0.6%)
+                            trail_drop = 0.010
                         else:
-                            trail_drop = 0.008
+                            trail_drop = 0.010
                     # v4.4: AutoTune 트레일링 조정
                     for _atr in self._autotune_rules:
                         if _atr['rule_type'] == 'trailing_adjust':
