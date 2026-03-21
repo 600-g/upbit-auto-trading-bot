@@ -203,6 +203,26 @@ def export():
     except:
         pass
 
+    # 시간대별 승률/손익
+    hourly = []
+    try:
+        conn2 = sqlite3.connect(DB_PATH)
+        c2 = conn2.cursor()
+        c2.execute('''
+            SELECT CAST(substr(timestamp,12,2) AS INT) hour,
+              COUNT(*) cnt,
+              SUM(CASE WHEN profit>0 THEN 1 ELSE 0 END) wins,
+              SUM(profit) pnl
+            FROM trades WHERE action="sell" AND profit != 0
+            GROUP BY hour ORDER BY hour
+        ''')
+        for r in c2.fetchall():
+            wr = (r[2] or 0) / r[1] * 100 if r[1] else 0
+            hourly.append({'hour': r[0], 'cnt': r[1], 'wins': r[2] or 0, 'wr': round(wr, 1), 'pnl': round(r[3] or 0)})
+        conn2.close()
+    except:
+        pass
+
     conn.close()
 
     data = {
@@ -220,6 +240,7 @@ def export():
         'coins': coins,
         'changelog': changelog,
         'positions': positions,
+        'hourly': hourly,
         'surge_watchlist': surge_watchlist,
         'bot_running': bot_running,
         'market': market,
