@@ -88,6 +88,14 @@ tr:hover { background: #1c2128; }
   <table id="batchTable"><thead><tr><th>배치</th><th>거래</th><th>승률</th><th>손익</th></tr></thead><tbody></tbody></table>
 </div>
 <div class="section">
+  <h2>시간대별 성과</h2>
+  <div id="hourlyChart" style="display:grid; grid-template-columns:repeat(12,1fr); gap:4px; margin-bottom:8px;"></div>
+  <div id="hourlyChart2" style="display:grid; grid-template-columns:repeat(12,1fr); gap:4px;"></div>
+  <div style="display:flex; justify-content:space-between; margin-top:8px; font-size:11px; color:#8b949e;">
+    <span>🟢 승률50%+ &amp; 수익</span><span>🟡 혼합</span><span>🔴 승률40%- 또는 손실</span>
+  </div>
+</div>
+<div class="section">
   <h2>최근 거래</h2>
   <table id="tradeTable"><thead><tr><th>시간</th><th>코인</th><th>손익</th><th>수익률</th><th>배치</th></tr></thead><tbody></tbody></table>
 </div>
@@ -170,6 +178,32 @@ async function load() {
         <td class="${pnlClass(b.pnl)}">${pnlSign(b.pnl)}원</td>
       </tr>
     `).join('');
+
+    // Hourly heatmap
+    if (d.hourly && d.hourly.length > 0) {
+      const allHours = Array.from({length: 24}, (_, i) => {
+        const found = d.hourly.find(h => h.hour === i);
+        return found || {hour: i, cnt: 0, wins: 0, wr: 0, pnl: 0};
+      });
+      const maxPnl = Math.max(...allHours.map(h => Math.abs(h.pnl)), 1);
+      const row1 = allHours.slice(0, 12);
+      const row2 = allHours.slice(12, 24);
+      function hourCell(h) {
+        let bg, border;
+        if (h.cnt === 0) { bg = '#161b22'; border = '#30363d'; }
+        else if (h.wr >= 50 && h.pnl > 0) { bg = `rgba(35,134,54,${Math.min(0.8, Math.abs(h.pnl)/maxPnl+0.2)})`; border = '#238636'; }
+        else if (h.wr < 40 || h.pnl < -50000) { bg = `rgba(218,54,51,${Math.min(0.8, Math.abs(h.pnl)/maxPnl+0.2)})`; border = '#da3633'; }
+        else { bg = `rgba(187,128,9,${Math.min(0.6, Math.abs(h.pnl)/maxPnl+0.15)})`; border = '#bb8009'; }
+        const pnlStr = h.pnl >= 0 ? '+' + (h.pnl/1000).toFixed(0) + 'k' : (h.pnl/1000).toFixed(0) + 'k';
+        return `<div style="background:${bg}; border:1px solid ${border}; border-radius:6px; padding:6px 2px; text-align:center; min-height:56px;">
+          <div style="font-size:11px; color:#8b949e;">${h.hour}시</div>
+          <div style="font-size:13px; font-weight:600; color:${h.wr>=50?'#3fb950':h.wr<40?'#f85149':'#e3b341'}">${h.cnt>0?h.wr+'%':'-'}</div>
+          <div style="font-size:10px; color:${h.pnl>=0?'#3fb950':'#f85149'}">${h.cnt>0?pnlStr:''}</div>
+        </div>`;
+      }
+      document.getElementById('hourlyChart').innerHTML = row1.map(hourCell).join('');
+      document.getElementById('hourlyChart2').innerHTML = row2.map(hourCell).join('');
+    }
 
     // Recent trades
     document.querySelector('#tradeTable tbody').innerHTML = d.recent.map(t => `
@@ -275,6 +309,20 @@ def api_status():
     except:
         pass
 
+    # Hourly stats (시간대별 승률/손익)
+    c.execute('''
+        SELECT CAST(substr(timestamp,12,2) AS INT) hour,
+          COUNT(*) cnt,
+          SUM(CASE WHEN profit>0 THEN 1 ELSE 0 END) wins,
+          SUM(profit) pnl
+        FROM trades WHERE action="sell" AND profit != 0
+        GROUP BY hour ORDER BY hour
+    ''')
+    hourly = []
+    for r in c.fetchall():
+        wr = (r[2] or 0) / r[1] * 100 if r[1] else 0
+        hourly.append({'hour': r[0], 'cnt': r[1], 'wins': r[2] or 0, 'wr': round(wr, 1), 'pnl': round(r[3] or 0)})
+
     # Bot running check
     bot_running = False
     pid_path = os.path.join(os.path.dirname(__file__), 'bot.pid')
@@ -302,6 +350,7 @@ def api_status():
         'batches': batches,
         'recent': recent,
         'positions': positions,
+        'hourly': hourly,
         'bot_running': bot_running,
         'updated': datetime.now().strftime('%H:%M:%S')
     })
