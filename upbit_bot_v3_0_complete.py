@@ -194,6 +194,20 @@ class TradingBotV3:
         # SQLite DB 초기화
         self._init_db()
 
+        # v5.20: AI 멀티에이전트 초기화 (_init_db 이후, _db_lock 존재 보장)
+        try:
+            from ai_agents import AIAgents
+            _ai_key = getattr(self, '_anthropic_key', '')
+            self.ai_agents = AIAgents(
+                db_path=os.path.join(os.path.dirname(__file__), 'trading_bot_v3.db'),
+                db_lock=self._db_lock,
+                api_key=_ai_key,
+                enabled=bool(_ai_key)
+            )
+        except Exception as e:
+            print(f"⚠️ [AI] 에이전트 초기화 실패: {e} (기존 로직으로 동작)")
+            self.ai_agents = None
+
         # DB에서 이전 포지션 복원
         self._load_positions()
 
@@ -449,20 +463,6 @@ class TradingBotV3:
                 print("⚠️ 텔레그램 토큰은 있지만 chat_id가 없음 - 콘솔 알림만 사용")
         except Exception as e:
             print(f"⚠️ 텔레그램 설정 로드 실패: {e} (콘솔 알림만 사용)")
-
-        # v5.20: AI 멀티에이전트 초기화 (반성학습 + Bull/Bear 토론)
-        try:
-            from ai_agents import AIAgents
-            _ai_key = getattr(self, '_anthropic_key', '')
-            self.ai_agents = AIAgents(
-                db_path=os.path.join(os.path.dirname(__file__), 'trading_bot_v3.db'),
-                db_lock=self._db_lock,
-                api_key=_ai_key,
-                enabled=bool(_ai_key)
-            )
-        except Exception as e:
-            print(f"⚠️ [AI] 에이전트 초기화 실패: {e} (기존 로직으로 동작)")
-            self.ai_agents = None
 
     def _detect_telegram_chat_id(self):
         """getUpdates API로 chat_id 자동 감지"""
