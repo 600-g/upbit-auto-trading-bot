@@ -450,6 +450,20 @@ class TradingBotV3:
         except Exception as e:
             print(f"⚠️ 텔레그램 설정 로드 실패: {e} (콘솔 알림만 사용)")
 
+        # v5.20: AI 멀티에이전트 초기화 (반성학습 + Bull/Bear 토론)
+        try:
+            from ai_agents import AIAgents
+            _ai_key = getattr(self, '_anthropic_key', '')
+            self.ai_agents = AIAgents(
+                db_path=os.path.join(os.path.dirname(__file__), 'trading_bot_v3.db'),
+                db_lock=self._db_lock,
+                api_key=_ai_key,
+                enabled=bool(_ai_key)
+            )
+        except Exception as e:
+            print(f"⚠️ [AI] 에이전트 초기화 실패: {e} (기존 로직으로 동작)")
+            self.ai_agents = None
+
     def _detect_telegram_chat_id(self):
         """getUpdates API로 chat_id 자동 감지"""
         try:
@@ -3045,6 +3059,18 @@ class TradingBotV3:
 
             self._save_positions()
             self._notify(f"[SELL] {coin} {batch_id} | {profit_rate:+.2f}% ({profit:+,.0f}원) | 잔고: {self.current_balance:,.0f}원")
+
+            # v5.20: AI 반성 (비동기, fire-and-forget)
+            if hasattr(self, 'ai_agents') and self.ai_agents:
+                self.ai_agents.reflect_async({
+                    'coin': coin, 'buy_price': position['buy_price'],
+                    'sell_price': price, 'profit_rate': profit_rate,
+                    'momentum_at_entry': _entry_momentum,
+                    'hold_duration_hours': self._hours_held(position),
+                    'market_state': getattr(self, 'last_market_state', ''),
+                    'batch_id': batch_id
+                })
+
             return True
         except Exception as e:
             print(f"❌ {coin} 매도 오류: {e}")
@@ -3530,6 +3556,19 @@ class TradingBotV3:
                             continue
                 except:
                     pass
+
+                # v5.20: AI 매수 전 검증 (Bull/Bear 토론 + 과거 교훈)
+                if hasattr(self, 'ai_agents') and self.ai_agents and self.ai_agents.enabled:
+                    _ai_indicators = {
+                        'rsi': self.analyze_rsi(coin),
+                        'volume_score': self.analyze_volume(coin),
+                        'momentum': momentum,
+                        'market_state': market_strength
+                    }
+                    _ai_result = self.ai_agents.pre_buy_check(coin, _ai_indicators)
+                    if not _ai_result['approved']:
+                        print(f" 🤖 [AI] {coin} 매수 차단: {_ai_result['block_reason']}")
+                        continue
 
                 print(f" ✅ 매수 (1차: {buy_amount:,}원)")
                 # 1차 매수 (코인당 할당의 50%)
