@@ -286,12 +286,15 @@ class AIAgents:
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ai_agent")
 
         if self.enabled:
-            self.llm = LLMClient(api_key)
-            self.reflection = ReflectionAgent(self.llm, db_path, db_lock)
-            self.debate = DebateAgent(self.llm)
-            print(f"🤖 [AI] 멀티에이전트 시스템 활성화 (모델: {self.llm.model})")
+            # TradingAgents 패턴: deep_think(판단) vs quick_think(복기)
+            self.llm_deep = LLMClient(api_key, model="claude-opus-4-6", timeout=30)    # 매수 판단 = 돈
+            self.llm_quick = LLMClient(api_key, model="claude-haiku-4-5-20251001", timeout=10)  # 복기 = 양
+            self.reflection = ReflectionAgent(self.llm_quick, db_path, db_lock)
+            self.debate = DebateAgent(self.llm_deep)
+            print(f"🤖 [AI] 멀티에이전트 활성화 (토론: {self.llm_deep.model} / 반성: {self.llm_quick.model})")
         else:
-            self.llm = None
+            self.llm_deep = None
+            self.llm_quick = None
             self.reflection = None
             self.debate = None
             print("🤖 [AI] 비활성 (API 키 없음)")
@@ -382,10 +385,16 @@ class AIAgents:
             return {'approved': True, 'block_reason': None, 'debate_summary': '', 'lessons_found': 0}
 
     def get_stats(self):
-        if not self.llm:
+        if not self.llm_deep:
             return {'enabled': False}
-        stats = self.llm.stats
-        stats['enabled'] = True
+        deep = self.llm_deep.stats
+        quick = self.llm_quick.stats if self.llm_quick else {}
+        stats = {
+            'enabled': True,
+            'debate': f"Opus {deep['calls']}회 ${deep['cost_usd']:.3f}",
+            'reflection': f"Haiku {quick.get('calls',0)}회 ${quick.get('cost_usd',0):.4f}",
+            'total_cost': round(deep['cost_usd'] + quick.get('cost_usd', 0), 4)
+        }
         # 교훈 수
         try:
             with self.db_lock:
@@ -402,6 +411,6 @@ class AIAgents:
         print("🤖 [AI] 비활성화")
 
     def enable(self):
-        if self.llm:
+        if self.llm_deep:
             self.enabled = True
             print("🤖 [AI] 활성화")
