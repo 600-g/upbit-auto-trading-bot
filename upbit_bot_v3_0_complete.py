@@ -2798,7 +2798,8 @@ class TradingBotV3:
     # 3. 자동 매수/매도
     # ============================================
     
-    MAX_POSITIONS = 2  # v5.12: 3→2 (확신 코인 집중, 건당 비중 확대)
+    MAX_POSITIONS = 2  # 기본 슬롯 (AI 토론 통과 시 동적 확대)
+    MAX_POSITIONS_BOOST = 4  # v5.22: AI 확신 시 최대 4슬롯
 
     # 코인 섹터 분류 (동일 섹터 집중 방지)
     COIN_SECTORS = {
@@ -2846,9 +2847,13 @@ class TradingBotV3:
                 print(f"⏸ {coin} 매수 차단: 일시중지 상태 (/resume으로 재개)")
                 return False
 
-            # ★ 최대 포지션 제한 (이미 보유 중인 코인의 추가 배치는 허용)
-            if coin not in self.positions and len(self.positions) >= self.MAX_POSITIONS:
-                print(f"🚫 {coin} 매수 차단: 이미 {len(self.positions)}종목 보유 (최대 {self.MAX_POSITIONS}종목)")
+            # v5.22: 동적 슬롯 — 모멘텀 50+ & AI 토론 통과 시 최대 4슬롯
+            _effective_max = self.MAX_POSITIONS
+            if momentum >= 50 and hasattr(self, 'ai_agents') and self.ai_agents:
+                _effective_max = self.MAX_POSITIONS_BOOST
+
+            if coin not in self.positions and len(self.positions) >= _effective_max:
+                print(f"🚫 {coin} 매수 차단: 이미 {len(self.positions)}종목 보유 (최대 {_effective_max}종목)")
                 return False
 
             # v5.15: 심야(23~06시) 모든 경로 매수 차단 (횡보교체/2차매수 포함)
@@ -4923,6 +4928,11 @@ class TradingBotV3:
                             trail_drop = max(0.003, trail_drop + _atr['param_value'])
                             break
                     if current_peak - profit_rate >= trail_drop:
+                        # v5.22: 모멘텀 살아있으면 1% 이상까지 참기 (가능하면 더 먹기)
+                        # 모멘텀 죽으면(<30) 바로 매도 OK
+                        if profit_rate < 0.01 and profit_rate > 0 and momentum >= 35 and uptrend:
+                            print(f"  💎 {coin} {batch_id} 수익 {profit_rate*100:+.2f}% < 1% but 모멘텀{momentum:.0f}+상승추세 → 더 기다림")
+                            continue
                         print(f"📉 {coin} {batch_id} 트레일링 (고점 {current_peak*100:+.2f}% → 현재 {profit_rate*100:+.2f}%, 폭 -{trail_drop*100:.1f}%, 모멘텀 {momentum:.0f})")
                         del self._trailing_peaks[trailing_key]
                         self.place_sell_order(coin, batch_id)
@@ -5006,6 +5016,10 @@ class TradingBotV3:
                         self._mini_trail_peaks[mini_trail_key] = profit_rate
                         mini_peak = profit_rate
                     if mini_peak >= 0.003 and mini_peak - profit_rate >= 0.0015:
+                        # v5.22: 모멘텀+추세 살아있으면 미니 트레일링 무시 (1%+ 노리기)
+                        if momentum >= 35 and uptrend:
+                            print(f"  💎 {coin} {batch_id} 미니트레일 발동({profit_rate*100:+.2f}%) but 모멘텀{momentum:.0f}+추세↑ → 더 기다림")
+                            continue
                         print(f"📉 {coin} {batch_id} 미니 트레일링 (고점 {mini_peak*100:+.2f}% → {profit_rate*100:+.2f}%, -0.15%) → 소액 익절")
                         if mini_trail_key in self._mini_trail_peaks:
                             del self._mini_trail_peaks[mini_trail_key]
