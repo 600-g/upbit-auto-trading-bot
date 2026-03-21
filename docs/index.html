@@ -278,14 +278,15 @@ function render(d) {
       else if(h.wr<40||h.pnl<-50000){bg=`rgba(218,54,51,${Math.min(.8,Math.abs(h.pnl)/mx+.2)})`;bd='#da3633';}
       else{bg=`rgba(187,128,9,${Math.min(.6,Math.abs(h.pnl)/mx+.15)})`;bd='#bb8009';}
       const p=h.pnl>=0?'+'+(h.pnl/1000).toFixed(0)+'k':(h.pnl/1000).toFixed(0)+'k';
-      return `<div style="background:${bg};border:1px solid ${bd};border-radius:5px;padding:4px 1px;text-align:center;min-height:48px;">
-        <div style="font-size:10px;color:#8b949e;">${h.hour}시</div>
-        <div style="font-size:12px;font-weight:700;color:${h.wr>=50?'#3fb950':h.wr<40?'#f85149':'#e3b341'}">${h.cnt?h.wr+'%':'-'}</div>
-        <div style="font-size:9px;color:${h.pnl>=0?'#3fb950':'#f85149'}">${h.cnt?p:''}</div></div>`;
+      return `<div style="background:${bg};border:1px solid ${bd};border-radius:4px;padding:3px 0;text-align:center;min-height:42px;">
+        <div style="font-size:9px;color:#8b949e;">${h.hour}시</div>
+        <div style="font-size:11px;font-weight:700;color:${h.wr>=50?'#3fb950':h.wr<40?'#f85149':'#e3b341'}">${h.cnt?h.wr+'%':'-'}</div>
+        <div style="font-size:8px;color:${h.pnl>=0?'#3fb950':'#f85149'}">${h.cnt?p:''}</div></div>`;
     }
     html += '<div class="sec"><h2>시간대별 성과</h2>';
-    html += '<div style="display:grid;grid-template-columns:repeat(12,1fr);gap:3px;margin-bottom:3px;">'+allH.slice(0,12).map(hc).join('')+'</div>';
-    html += '<div style="display:grid;grid-template-columns:repeat(12,1fr);gap:3px;">'+allH.slice(12).map(hc).join('')+'</div>';
+    html += '<div style="display:grid;grid-template-columns:repeat(8,1fr);gap:2px;margin-bottom:2px;">'+allH.slice(0,8).map(hc).join('')+'</div>';
+    html += '<div style="display:grid;grid-template-columns:repeat(8,1fr);gap:2px;margin-bottom:2px;">'+allH.slice(8,16).map(hc).join('')+'</div>';
+    html += '<div style="display:grid;grid-template-columns:repeat(8,1fr);gap:2px;">'+allH.slice(16).map(hc).join('')+'</div>';
     html += '<div style="font-size:10px;color:#484f58;margin-top:6px;display:flex;justify-content:space-between;"><span>🟢50%+수익</span><span>🟡혼합</span><span>🔴40%-손실</span></div></div>';
   }
 
