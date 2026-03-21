@@ -3176,9 +3176,9 @@ class TradingBotV3:
         elif 8 <= _cur_hour < 13:
             min_score = min(min_score + 7, 32)  # v5.8: 오전 +7점 (8시 8%승률, 11시 10%승률)
             print(f"🌅 오전({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
-        elif 13 <= _cur_hour < 18:
-            # v5.12: 최고 시간대(13~18시) 기준 완화 — 승률 53~60%, +944k
-            min_score = max(min_score - 3, 10)  # -3점 완화
+        elif _cur_hour in (13, 15, 16, 17):
+            # v5.18: 13,15~17시만 완화 (14시는 33%승률 -123k → 제외)
+            min_score = max(min_score - 3, 10)
             print(f"☀️ 오후({_cur_hour:02d}시) → 모멘텀 기준 완화: {min_score}점")
         # v5.6: AutoTune 시간대 부스트 (새벽 등 전패 구간 자동 감지)
         _time_boost = getattr(self, '_autotune_time_boost', {})
