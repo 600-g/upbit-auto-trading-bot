@@ -3211,14 +3211,6 @@ class TradingBotV3:
             # v5.15: 심야 차단은 place_buy_order에서 처리, 여기서도 코인 스캔 생략
             print(f"🌙 심야({_cur_hour:02d}시) → 코인 스캔/진입 생략 (포지션 관리만)")
             return
-        elif _cur_hour == 20:
-            # v5.24: 20시 매수 차단 (데이터: 30% 승률, -365k)
-            print(f"🚫 20시 → 매수 차단 (데이터: 승률30%, -365k)")
-            return
-        elif _cur_hour == 12:
-            # v5.24: 12시 매수 차단 (데이터: 12% 승률, -139k)
-            print(f"🚫 12시 → 매수 차단 (데이터: 승률12%, -139k)")
-            return
         elif _cur_hour >= 18:
             min_score = min(min_score + 5, 45)  # v5.23: 저녁 강화
             print(f"🌆 저녁({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
