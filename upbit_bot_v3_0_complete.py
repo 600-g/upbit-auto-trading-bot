@@ -3185,8 +3185,8 @@ class TradingBotV3:
         # 미국 시장 연동
         us_state, us_adjust = self.check_us_market()
         min_score = max(0, min(100, min_score + us_adjust))
-        # v5.4: 최소 기준 캡 — 어떤 상황에서도 30 이하로 유지
-        min_score = min(min_score, 30)
+        # v5.23: 최소 기준 캡 40 (데이터: 30미만 283건 -605k, 40+ 44건 +481k)
+        min_score = min(min_score, 40)
 
         print(f"📈 시장 상태: {market_strength} | 미국: {us_state} → 최소 신호: {min_score}점")
 
@@ -3202,15 +3202,15 @@ class TradingBotV3:
             print(f"🌙 심야({_cur_hour:02d}시) → 코인 스캔/진입 생략 (포지션 관리만)")
             return
         elif _cur_hour >= 18:
-            min_score = min(min_score + 5, 30)  # 저녁: +5점
+            min_score = min(min_score + 5, 45)  # v5.23: 저녁 강화
             print(f"🌆 저녁({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
         elif 8 <= _cur_hour < 13:
-            min_score = min(min_score + 7, 32)  # v5.8: 오전 +7점 (8시 8%승률, 11시 10%승률)
+            min_score = min(min_score + 7, 47)  # v5.23: 오전 강화
             print(f"🌅 오전({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
         elif _cur_hour in (13, 15, 16, 17):
-            # v5.18: 13,15~17시만 완화 (14시는 33%승률 -123k → 제외)
-            min_score = max(min_score - 3, 10)
-            print(f"☀️ 오후({_cur_hour:02d}시) → 모멘텀 기준 완화: {min_score}점")
+            # v5.23: 오후도 최소 35 유지 (기존 완화 제거)
+            min_score = max(min_score, 35)
+            print(f"☀️ 오후({_cur_hour:02d}시) → 모멘텀 기준: {min_score}점")
         # v5.6: AutoTune 시간대 부스트 (새벽 등 전패 구간 자동 감지)
         _time_boost = getattr(self, '_autotune_time_boost', {})
         if _time_boost:
@@ -3489,8 +3489,8 @@ class TradingBotV3:
 
                     signal_count = len(signals)
 
-                    # v5.14: 모멘텀 40+ 집중 (데이터: 40+ 승률58%+235k, 30-40 33%-70k)
-                    min_signals = 1 if momentum >= 40 else 2
+                    # v5.23: 모멘텀 50+ 시그널 1개, 40~49 시그널 2개 (데이터: 40+ +481k)
+                    min_signals = 1 if momentum >= 50 else 2
                     if signal_count < min_signals:
                         print(f" ⚠️ 시그널 {signal_count}개({', '.join(signals) if signals else '없음'}) → {min_signals}개 이상 필요, 매수 보류")
                         continue
@@ -4730,17 +4730,18 @@ class TradingBotV3:
                 if profit_rate > position.get('peak_rate', 0):
                     position['peak_rate'] = profit_rate
 
-                # ★ 빠른 컷 (완화): 1분 내 -1.5% 급락 즉시컷, 5분 내 -1.0% 빠른컷
+                # v5.23: 최소 보유 15분 (0% 즉시매도 근절) — 급락(-2%)만 예외
                 minutes_held = hours * 60
-                # v5.19: 빠른 컷 완화 (데이터: 손실 24%가 1시간 내 회복, ANKR -1.23%→+2.71%)
-                # 기존: 1분 -1.5%, 5분 -1.0% → 완화: 1분 -2.0%, 5분 -1.5%
+                if minutes_held < 15 and profit_rate > -0.02:
+                    if minutes_held <= 1 and profit_rate <= -0.02:
+                        pass  # 급락은 아래에서 처리
+                    else:
+                        print(f"  {coin} {batch_id}: {profit_rate*100:+.2f}% | {minutes_held:.0f}분 | ⏳ 최소보유 15분 미달, 홀딩")
+                        continue
+
+                # ★ 빠른 컷: 급락(-2%) 즉시컷만 유지 (5분 컷 제거 — 보유시간 늘리기)
                 if minutes_held <= 1 and profit_rate <= -0.02:
                     print(f"✂️ {coin} {batch_id} 급락 즉시컷 ({minutes_held:.0f}분, {profit_rate*100:+.2f}% ≤ -2.0%)")
-                    self.place_sell_order(coin, batch_id)
-                    self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': True, 'exit_price': price}
-                    continue
-                elif minutes_held <= 5 and profit_rate <= -0.015:
-                    print(f"✂️ {coin} {batch_id} 빠른 컷 ({minutes_held:.0f}분, {profit_rate*100:+.2f}% ≤ -1.5%)")
                     self.place_sell_order(coin, batch_id)
                     self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': True, 'exit_price': price}
                     continue
@@ -5305,8 +5306,9 @@ if __name__ == "__main__":
                     us_state, _ = bot.check_us_market()
                     last_market_check = now
 
-                # v5.3: surge 포지션 또는 워치리스트 있으면 30초마다 긴급 모니터링
-                if bot._surge_positions or bot._surge_watchlist:
+                # v5.23: surge 비활성화 (데이터: surge -130k+ 누적손실, 모멘텀0 무검증 진입)
+                # 기존 surge 포지션만 관리 (신규 진입 차단)
+                if bot._surge_positions:
                     with bot._trade_lock:
                         bot.surge_trade()
 
@@ -5327,7 +5329,9 @@ if __name__ == "__main__":
                         bot.monitor_positions()
 
                     bot.idle_fund_trade()
-                    bot.surge_trade()
+                    # v5.23: surge 비활성화 — 기존 포지션만 관리
+                    if bot._surge_positions:
+                        bot.surge_trade()
 
                 # v5.6: 대시보드 업데이트 (5분마다)
                 if now - last_dashboard >= DASHBOARD_INTERVAL:

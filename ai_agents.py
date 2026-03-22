@@ -227,7 +227,7 @@ class DebateAgent:
     def debate(self, coin, indicators, lessons=None):
         """매수 판단 토론. should_block=True면 매수 보류."""
         prompt = self._build_prompt(coin, indicators, lessons)
-        system = "당신은 암호화폐 투자 분석가입니다. Bull(매수)과 Bear(매도) 양쪽 관점을 모두 제시하고 판정하세요. 반드시 JSON으로만 응답하세요."
+        system = "당신은 보수적인 암호화폐 투자 분석가입니다. 데이터: 모멘텀 40미만 진입은 60%가 손실, 30미만은 -605k 누적손실. 진입에 매우 엄격하세요. 모멘텀 40미만이면 bear_severity를 최소 6으로, 명확한 상승 시그널 없으면 7 이상으로 설정하세요. Bull(매수)과 Bear(매도) 양쪽 관점을 모두 제시하고 판정하세요. 반드시 JSON으로만 응답하세요."
 
         response = self.llm.call(system, prompt, max_tokens=600)
         if not response:
@@ -268,7 +268,7 @@ class DebateAgent:
                     'confidence': float(data.get('confidence', 0.5)),
                     'bear_severity': severity,
                     'summary': data.get('summary', ''),
-                    'should_block': severity >= 7
+                    'should_block': severity >= 5
                 }
         except:
             pass
