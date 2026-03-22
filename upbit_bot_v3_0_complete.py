@@ -154,6 +154,7 @@ class TradingBotV3:
         self._daily_coin_buys = {}     # {coin: count} 코인별 일일 매수 횟수
         self._daily_reset_date = None  # 마지막 리셋 날짜
         self._max_daily_coin_buys = 2  # v5.2: 같은 코인 하루 최대 2회 (재진입 손실 방지)
+        self._daily_coin_losses = {}   # v5.24: {coin: loss_count} 당일 패배 카운터
         self._max_batch = 4            # 추가매수 최대 batch_4까지
 
         # v4.4: 자동 학습 시스템 (Auto-Tune)
@@ -2880,9 +2881,15 @@ class TradingBotV3:
             today = datetime.now().date()
             if self._daily_reset_date != today:
                 self._daily_coin_buys = {}
+                self._daily_coin_losses = {}
                 self._daily_reset_date = today
 
-            # v4.3: 같은 코인 하루 3회 초과 매수 차단
+            # v5.24: 당일 1패 코인 재진입 금지 (CFG -306k, ANKR -120k 반복진입 방지)
+            if self._daily_coin_losses.get(coin, 0) >= 1:
+                print(f"🚫 {coin} 매수 차단: 오늘 이미 {self._daily_coin_losses[coin]}패 (1패 시 당일 차단)")
+                return False
+
+            # v4.3: 같은 코인 하루 2회 초과 매수 차단
             daily_count = self._daily_coin_buys.get(coin, 0)
             if daily_count >= self._max_daily_coin_buys:
                 print(f"🚫 {coin} 매수 차단: 오늘 이미 {daily_count}회 매수 (최대 {self._max_daily_coin_buys}회/일)")
@@ -3053,6 +3060,9 @@ class TradingBotV3:
             # v5.9: 진입 시 저장한 모멘텀 기록 (AutoTune 분석 정확도 개선)
             _entry_momentum = position.get('momentum', 0)
             self._last_sell_pnl[coin] = profit_rate  # 손실 비례 쿨다운용
+            # v5.24: 패배 카운터 기록 (당일 1패 시 재진입 금지)
+            if profit < 0:
+                self._daily_coin_losses[coin] = self._daily_coin_losses.get(coin, 0) + 1
             self._db_log_trade(coin, "sell", price, quantity, sell_amount,
                                profit=profit, profit_rate=profit_rate,
                                momentum=_entry_momentum, batch=batch_id)
@@ -3200,6 +3210,14 @@ class TradingBotV3:
         if _cur_hour >= 23 or _cur_hour < 6:
             # v5.15: 심야 차단은 place_buy_order에서 처리, 여기서도 코인 스캔 생략
             print(f"🌙 심야({_cur_hour:02d}시) → 코인 스캔/진입 생략 (포지션 관리만)")
+            return
+        elif _cur_hour == 20:
+            # v5.24: 20시 매수 차단 (데이터: 30% 승률, -365k)
+            print(f"🚫 20시 → 매수 차단 (데이터: 승률30%, -365k)")
+            return
+        elif _cur_hour == 12:
+            # v5.24: 12시 매수 차단 (데이터: 12% 승률, -139k)
+            print(f"🚫 12시 → 매수 차단 (데이터: 승률12%, -139k)")
             return
         elif _cur_hour >= 18:
             min_score = min(min_score + 5, 45)  # v5.23: 저녁 강화
@@ -4303,9 +4321,8 @@ class TradingBotV3:
         try:
             now = time.time()
 
-            # v5.12: surge 관찰 모드 (매수 안 하고 감지+로그만)
-            # batch가 일 +50~300k 수익인데 surge가 -538k 갉아먹는 구조 → 비활성화
-            _surge_observe_only = True
+            # v5.24: surge 재활성화 (필터 강화: AI 토론 + 모멘텀 30+ 필수)
+            _surge_observe_only = False
 
             # 기존 포지션 모니터링은 유지 (이미 보유 중이면 관리)
 
@@ -4362,13 +4379,33 @@ class TradingBotV3:
                         del self._surge_watchlist[coin]
                         continue
 
-                    # v5.4: 모멘텀 음수면 진입 차단 (급등 자체가 모멘텀이므로 0점은 허용)
+                    # v5.24: surge 진입 품질 강화 — 모멘텀 30+ 필수
                     try:
-                        _m_score, _m_detail = self.calculate_momentum(coin)
+                        _m_score = self.calculate_momentum(coin)
                     except:
                         _m_score = 0
-                    if _m_score < 0:
-                        print(f"🚀 [SURGE 차단] {coin} 모멘텀 {_m_score}점(음수) → 진입 포기")
+                    if _m_score < 30:
+                        print(f"🚀 [SURGE 차단] {coin} 모멘텀 {_m_score}점 < 30 → 진입 포기")
+                        del self._surge_watchlist[coin]
+                        continue
+
+                    # v5.24: AI 토론 검증 (surge도 AI 통과 필수)
+                    if hasattr(self, 'ai_agents') and self.ai_agents and self.ai_agents.enabled:
+                        _ai_ind = {
+                            'rsi': self.analyze_rsi(coin),
+                            'volume_score': self.analyze_volume(coin),
+                            'momentum': _m_score,
+                            'market_state': getattr(self, 'last_market_state', '보통')
+                        }
+                        _ai_res = self.ai_agents.pre_buy_check(coin, _ai_ind)
+                        if not _ai_res['approved']:
+                            print(f"🚀 [SURGE AI차단] {coin}: {_ai_res['block_reason']}")
+                            del self._surge_watchlist[coin]
+                            continue
+
+                    # v5.24: 당일 1패 코인 surge도 차단
+                    if self._daily_coin_losses.get(coin, 0) >= 1:
+                        print(f"🚀 [SURGE 차단] {coin} 오늘 이미 패배 → 재진입 금지")
                         del self._surge_watchlist[coin]
                         continue
 
@@ -4760,18 +4797,20 @@ class TradingBotV3:
                         surge_peak = profit_rate
 
                     surge_sell = None
-                    # -1.5% 즉시 손절
-                    if profit_rate <= -0.015:
+                    # v5.24: 거래량 기반 동적 보유시간 (5분 기본 → 거래량 좋으면 10분)
+                    _surge_vol = 0
+                    try:
+                        _surge_vol = self.analyze_volume(coin)
+                    except:
+                        pass
+                    _surge_timeout = 10 if _surge_vol >= 60 else 5  # 거래량 좋으면 10분, 아니면 5분
+
+                    # -1.0% 즉시 손절 (기존 -1.5% → 타이트하게)
+                    if profit_rate <= -0.01:
                         surge_sell = f"손절 {profit_rate*100:+.2f}%"
-                    # v5.8: 5분+ -1% 손절 추가 (기존: -1~-1.5% 구간 28건 -486k 방치)
-                    elif minutes_surge >= 5 and profit_rate <= -0.01:
-                        surge_sell = f"5분 손절 ({minutes_surge:.0f}분, {profit_rate*100:+.2f}%)"
-                    # 10분+ 손실 시 타임아웃
-                    elif minutes_surge >= 10 and profit_rate < 0:
-                        surge_sell = f"타임아웃 손절 ({minutes_surge:.0f}분, {profit_rate*100:+.2f}%)"
-                    # 15분+ 횡보 정리
-                    elif minutes_surge >= 15 and profit_rate < 0.005:
-                        surge_sell = f"횡보 정리 ({minutes_surge:.0f}분, {profit_rate*100:+.2f}%)"
+                    # 타임아웃: 수익 없으면 퀵엑싯
+                    elif minutes_surge >= _surge_timeout and profit_rate < 0.003:
+                        surge_sell = f"{_surge_timeout}분 타임아웃 ({minutes_surge:.0f}분, {profit_rate*100:+.2f}%, 거래량{_surge_vol})"
                     # +2% 트레일링 (고점 -0.7%)
                     elif surge_peak >= 0.02 and (surge_peak - profit_rate) >= 0.007:
                         surge_sell = f"트레일링 (고점 {surge_peak*100:+.2f}% → {profit_rate*100:+.2f}%)"
@@ -5021,6 +5060,10 @@ class TradingBotV3:
                         if momentum >= 35 and uptrend:
                             print(f"  💎 {coin} {batch_id} 미니트레일 발동({profit_rate*100:+.2f}%) but 모멘텀{momentum:.0f}+추세↑ → 더 기다림")
                             continue
+                        # v5.24: 수수료 구간(0.1% 이하) 매도 방지 — 실전 -36만원 손실 방지
+                        if profit_rate < 0.001:
+                            print(f"  ⚠️ {coin} {batch_id} 미니트레일 발동이지만 수익 {profit_rate*100:+.2f}% < 0.1% → 수수료 손실, 홀딩")
+                            continue
                         print(f"📉 {coin} {batch_id} 미니 트레일링 (고점 {mini_peak*100:+.2f}% → {profit_rate*100:+.2f}%, -0.15%) → 소액 익절")
                         if mini_trail_key in self._mini_trail_peaks:
                             del self._mini_trail_peaks[mini_trail_key]
@@ -5039,15 +5082,21 @@ class TradingBotV3:
                     self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False, 'early_exit': True, 'exit_price': price}
                     continue
 
-                # === 3.4 v5.6: 30분+ 수익 미도달 정리 — 손실 중(-0.5%+)만 ===
-                # 원칙: 0% 이상이면 절대 팔지 않음
-                if hours >= 0.5 and profit_rate < -0.005 and not uptrend:
-                    peak = position.get('peak_rate', profit_rate)
-                    if peak < 0.003:
-                        print(f"⏰ {coin} {batch_id} 30분+ 수익 미도달(고점 {peak*100:+.2f}%) + 현재 {profit_rate*100:+.2f}% → 조기 정리")
+                # === v5.24: 30분 타임아웃 (데이터: 30-60분 -400k, 승률33%) ===
+                # 30분 넘었는데 수익 0.3% 미만이면 탈출 (거래량 좋으면 예외)
+                if hours >= 0.5 and profit_rate < 0.003:
+                    _vol_30m = 0
+                    try:
+                        _vol_30m = self.analyze_volume(coin)
+                    except:
+                        pass
+                    if _vol_30m >= 60 and momentum >= 40:
+                        print(f"  ⏰ {coin} {batch_id} 30분+ 횡보({profit_rate*100:+.2f}%) but 거래량{_vol_30m}+모멘텀{momentum:.0f} → 유지")
+                    else:
+                        print(f"⏰ {coin} {batch_id} 30분 타임아웃 ({profit_rate*100:+.2f}%, 모멘텀{momentum:.0f}, 거래량{_vol_30m}) → 정리")
                         self.place_sell_order(coin, batch_id)
                         self._sell_cooldown[coin] = {
-                            'time': time.time(), 'stoploss': False,
+                            'time': time.time(), 'stoploss': profit_rate < 0,
                             'early_exit': True, 'exit_price': price
                         }
                         continue
@@ -5306,9 +5355,8 @@ if __name__ == "__main__":
                     us_state, _ = bot.check_us_market()
                     last_market_check = now
 
-                # v5.23: surge 비활성화 (데이터: surge -130k+ 누적손실, 모멘텀0 무검증 진입)
-                # 기존 surge 포지션만 관리 (신규 진입 차단)
-                if bot._surge_positions:
+                # v5.24: surge 재활성화 (모멘텀30+ AI토론 필수, 거래량 동적 보유)
+                if bot._surge_positions or bot._surge_watchlist:
                     with bot._trade_lock:
                         bot.surge_trade()
 
@@ -5329,9 +5377,7 @@ if __name__ == "__main__":
                         bot.monitor_positions()
 
                     bot.idle_fund_trade()
-                    # v5.23: surge 비활성화 — 기존 포지션만 관리
-                    if bot._surge_positions:
-                        bot.surge_trade()
+                    bot.surge_trade()
 
                 # v5.6: 대시보드 업데이트 (5분마다)
                 if now - last_dashboard >= DASHBOARD_INTERVAL:
