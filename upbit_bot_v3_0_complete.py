@@ -149,6 +149,7 @@ class TradingBotV3:
         self._last_surge_entry = 0     # 마지막 서지 진입 시각
         self._surge_coin_count = {}    # v5.26: 코인별 surge 진입 횟수 (같은 코인 3회까지)
         self._surge_last_sell_price = {} # v5.26: 코인별 마지막 surge 매도가 (재진입: 매도가보다 싸게만)
+        self._surge_first_loss = set()  # v5.27: 첫 진입 손실 코인 (다회 진입 금지)
         self._surge_watchlist = {}     # v5.3: 눌림목 대기열 {coin: {detected_price, peak_price, timestamp, surge_type, ...}}
 
         # v4.3: 과매매 방지
@@ -4072,6 +4073,8 @@ class TradingBotV3:
             owned = set(self.positions.keys()) | set(self._scalp_positions.keys()) | set(self._surge_positions.keys()) | set(self._surge_watchlist.keys())
             cooldown_coins = set(self._sell_cooldown.keys())
             maxed_coins = {c for c, n in self._surge_coin_count.items() if n >= 3}  # v5.26: 3회까지
+            # v5.27: 첫 진입 손실 코인 = 진짜 급등 아님, 재진입 금지
+            maxed_coins = maxed_coins | self._surge_first_loss
             _blacklist = self._permanent_blacklist | self._autotune_blacklist
             candidates = []
 
@@ -4400,79 +4403,44 @@ class TradingBotV3:
 
                 sell_reason = None
 
-                # v5.5: 타임아웃 확대 (데이터: 15분+ 보유 승률 44%, 5~15분 12%)
-                is_early = pos.get('surge_type') == 'early'
-                timeout_loss = 30 if is_early else 20     # 손실 타임아웃: 10→20분
-                timeout_flat = 45 if is_early else 30     # 횡보 타임아웃: 15→30분
+                # v5.27: 데이터 기반 surge 매도 (5-8분 최적, 0-3분 손절 -120만 방지)
+                #
+                # 절대 손절: -0.7% (기존 -1.5%는 너무 늦음, 0-3분 평균 -2.6%)
+                if profit_rate <= -0.007:
+                    sell_reason = f"손절 {profit_rate*100:+.2f}%"
 
-                # v5.26: 수익 퀵엑싯 — 최대한 수익일 때 팔기
-                # +1%+ 수익이면 고점 대비 -0.3% 하락 시 즉시 익절 (빡빡한 트레일링)
-                if profit_rate >= 0.01 and peak_rate >= 0.01:
-                    _trail_from_peak = peak_rate - profit_rate
-                    if _trail_from_peak >= 0.003:
-                        sell_reason = f"수익 퀵엑싯 (고점{peak_rate*100:+.1f}% → {profit_rate*100:+.1f}%, -{_trail_from_peak*100:.1f}%)"
-                # +0.5%+ 수익이면 1분봉 음봉 나오면 즉시 익절
+                # 5분 미만: 급락만 컷, 나머지는 홀딩 (5-8분 스위트스팟 노리기)
+                elif elapsed_min < 5:
+                    if profit_rate <= -0.007:
+                        sell_reason = f"초기 손절 {profit_rate*100:+.2f}%"
+                    else:
+                        # 수익이어도 5분까지 홀딩 (데이터: 5-8분이 +100만원 최대)
+                        print(f"  🚀 [SURGE] {coin}: {profit_rate*100:+.2f}% | {elapsed_min:.1f}분 | 5분 스위트스팟 대기")
+                        continue
+
+                # 5분+ 수익 퀵엑싯
+                # +1%+ 수익: 고점 대비 -0.3% 하락 시 즉시 익절
+                elif profit_rate >= 0.01 and peak_rate >= 0.01:
+                    _trail = peak_rate - profit_rate
+                    if _trail >= 0.003:
+                        sell_reason = f"퀵엑싯 (고점{peak_rate*100:+.1f}%→{profit_rate*100:+.1f}%)"
+                # +0.5%+ 수익: 1분봉 음봉이면 수익 보호
                 elif profit_rate >= 0.005:
                     try:
                         _1m = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute1", count=2)
                         if _1m is not None and len(_1m) >= 2:
                             if _1m['close'].iloc[-1] < _1m['open'].iloc[-1]:
-                                sell_reason = f"수익 보호 ({profit_rate*100:+.2f}%, 1분봉 음봉)"
+                                sell_reason = f"수익보호 ({profit_rate*100:+.2f}%, 음봉)"
                     except:
                         pass
 
-                # 1. -1% 손절 (v5.24 타이트)
-                if sell_reason is None and profit_rate <= -0.01:
-                    sell_reason = f"손절 {profit_rate*100:+.2f}%"
+                # 10분 타임아웃: 수익 0.3% 미만이면 정리 (데이터: 5-8분 이후 급감)
+                if sell_reason is None and elapsed_min >= 10 and profit_rate < 0.003:
+                    sell_reason = f"타임아웃 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
 
-                # 최소보유 2분 (기존 5분→2분, 퀵엑싯 체계)
-                elif sell_reason is None and elapsed_min < 2:
-                    if profit_rate <= -0.015:
-                        sell_reason = f"급락 즉시컷 {profit_rate*100:+.2f}%"
-                    else:
-                        print(f"  🚀 [SURGE] {coin}: {profit_rate*100:+.2f}% | 최소보유 대기 ({elapsed_min:.1f}분/2분)")
-                        continue
-
-                # 2. 스마트 손절 — 거래량 보고 반등 대기
-                elif sell_reason is None and profit_rate <= -0.01:
-                    vol_alive = False
-                    try:
-                        _ohlcv_1m = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute1", count=5)
-                        if _ohlcv_1m is not None and len(_ohlcv_1m) >= 3:
-                            recent_vol = _ohlcv_1m['volume'].iloc[-1]
-                            avg_vol = _ohlcv_1m['volume'].iloc[:-1].mean()
-                            # 1분봉 양봉 여부 (반등 중인지)
-                            last_bullish = _ohlcv_1m['close'].iloc[-1] > _ohlcv_1m['open'].iloc[-1]
-                            if avg_vol > 0 and recent_vol >= avg_vol * 1.5 and last_bullish:
-                                vol_alive = True
-                    except:
-                        pass
-                    defer_count = pos.get('_stop_defer_count', 0)
-                    if vol_alive and defer_count < 3:
-                        # 거래량 활발 + 양봉 → 반등 대기 (최대 3회 = ~90초)
-                        pos['_stop_defer_count'] = defer_count + 1
-                        print(f"  🚀 [SURGE] {coin} 스마트 손절 대기 {defer_count+1}/3 — 거래량↑ 양봉 ({profit_rate*100:+.2f}%)")
-                    else:
-                        sell_reason = f"손절 {profit_rate*100:+.2f}% (유예 {defer_count}회)"
-
-                # v5.5: 5분 퀵엑싯 제거 (데이터: 5~15분 손절이 승률 최악 12%)
-                # 대신 -1% 이상 깊은 손실만 타임아웃 적용
-
-                # 2. 타임아웃 손절 — 깊은 손실(-0.5%+)만 적용
-                elif elapsed_min >= timeout_loss and profit_rate < -0.005:
-                    sell_reason = f"타임아웃 손절 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
-
-                # 3. 횡보 정리 — 소손실(-0.5% 미만)은 더 기다림
-                elif elapsed_min >= timeout_flat and profit_rate < -0.005:
-                    sell_reason = f"횡보 정리 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
-
-                # v5.5: 최종 타임아웃 — 40분 지나면 뭐든 정리
-                elif elapsed_min >= 40 and profit_rate < 0.003:
+                # v5.27: 15분 최종 타임아웃 (데이터: 8분+ 급감)
+                if sell_reason is None and elapsed_min >= 15:
                     sell_reason = f"최종 타임아웃 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
-
-                # v5.3: 미니 트레일링 — +0.5%~2% 구간에서 고점 대비 -0.4% 하락 시 익절
-                elif 0.005 <= peak_rate < 0.02 and (peak_rate - profit_rate) >= 0.004:
-                    sell_reason = f"미니 트레일링 익절 (고점 {peak_rate*100:+.2f}% → {profit_rate*100:+.2f}%)"
 
                 # 4. +2% 이상 트레일링 스탑 활성화 (고점 대비 -0.7% 하락 시 매도)
                 elif peak_rate >= 0.02 and (peak_rate - profit_rate) >= 0.007:
@@ -4523,6 +4491,10 @@ class TradingBotV3:
                     if profit_rate <= 0:
                         self._sell_cooldown[coin] = {'time': now, 'stoploss': True, 'source': 'surge', 'exit_price': price}
                         self._surge_loss_streak = getattr(self, '_surge_loss_streak', 0) + 1
+                        # v5.27: 첫 진입 손실 → 진짜 급등 아님, 다회 진입 금지
+                        if self._surge_coin_count.get(coin, 0) <= 1:
+                            self._surge_first_loss.add(coin)
+                            print(f"🚫 [SURGE] {coin} 첫 진입 손실 → 다회 진입 금지 (진짜 급등 아님)")
                         if self._surge_loss_streak >= 2:
                             self._surge_blocked_until = now + 1800
                             print(f"🚨 [SURGE] 연속 {self._surge_loss_streak}회 손실 → 30분 진입 차단")
