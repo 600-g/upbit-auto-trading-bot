@@ -4405,17 +4405,45 @@ class TradingBotV3:
 
                 # v5.27: 데이터 기반 surge 매도 (5-8분 최적, 0-3분 손절 -120만 방지)
                 #
-                # 절대 손절: -0.7% (기존 -1.5%는 너무 늦음, 0-3분 평균 -2.6%)
-                if profit_rate <= -0.007:
-                    sell_reason = f"손절 {profit_rate*100:+.2f}%"
+                # 거래량 체크 — 손실 구간에서 버틸지 컷할지 판단 기준
+                _vol_alive = False
+                _vol_ratio_now = 0
+                try:
+                    _vm = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute1", count=5)
+                    if _vm is not None and len(_vm) >= 3:
+                        _v_recent = _vm['volume'].iloc[-1]
+                        _v_avg = _vm['volume'].iloc[:-1].mean()
+                        _v_bullish = _vm['close'].iloc[-1] > _vm['open'].iloc[-1]
+                        _vol_ratio_now = _v_recent / _v_avg if _v_avg > 0 else 0
+                        # 거래량 1.5배+ & 양봉 = 아직 살아있다
+                        _vol_alive = _vol_ratio_now >= 1.5 and _v_bullish
+                except:
+                    pass
+
+                # -1.5% 절대 손절 (거래량 무관, 데이터: -2%+ 39건 = -155만, 버텨도 75% 추가손실)
+                if profit_rate <= -0.015:
+                    sell_reason = f"절대 손절 {profit_rate*100:+.2f}%"
+
+                # -0.7% 손절 판단 — 거래량 보고 결정
+                elif profit_rate <= -0.007:
+                    if _vol_alive:
+                        # 거래량 살아있고 양봉 → 반등 가능성, 1회 유예 (최대 2회)
+                        _defer = pos.get('_loss_defer', 0)
+                        if _defer < 2:
+                            pos['_loss_defer'] = _defer + 1
+                            print(f"  🚀 [SURGE] {coin} {profit_rate*100:+.2f}% 손실이지만 거래량{_vol_ratio_now:.1f}배+양봉 → 유예 {_defer+1}/2")
+                            continue
+                        else:
+                            sell_reason = f"손절 {profit_rate*100:+.2f}% (거래량 유예 2회 소진)"
+                    else:
+                        sell_reason = f"손절 {profit_rate*100:+.2f}% (거래량{_vol_ratio_now:.1f}배↓)"
 
                 # 5분 미만: 급락만 컷, 나머지는 홀딩 (5-8분 스위트스팟 노리기)
                 elif elapsed_min < 5:
                     if profit_rate <= -0.007:
                         sell_reason = f"초기 손절 {profit_rate*100:+.2f}%"
                     else:
-                        # 수익이어도 5분까지 홀딩 (데이터: 5-8분이 +100만원 최대)
-                        print(f"  🚀 [SURGE] {coin}: {profit_rate*100:+.2f}% | {elapsed_min:.1f}분 | 5분 스위트스팟 대기")
+                        print(f"  🚀 [SURGE] {coin}: {profit_rate*100:+.2f}% | {elapsed_min:.1f}분 | 거래량{_vol_ratio_now:.1f}배 | 5분 대기")
                         continue
 
                 # 5분+ 수익 퀵엑싯
@@ -4434,11 +4462,14 @@ class TradingBotV3:
                     except:
                         pass
 
-                # 10분 타임아웃: 수익 0.3% 미만이면 정리 (데이터: 5-8분 이후 급감)
+                # 10분 타임아웃: 거래량 살아있으면 15분까지 연장
                 if sell_reason is None and elapsed_min >= 10 and profit_rate < 0.003:
-                    sell_reason = f"타임아웃 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
+                    if _vol_alive and elapsed_min < 15:
+                        print(f"  🚀 [SURGE] {coin} 10분+ 횡보이지만 거래량{_vol_ratio_now:.1f}배+양봉 → 15분까지 연장")
+                    else:
+                        sell_reason = f"타임아웃 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%, 거래량{_vol_ratio_now:.1f}배)"
 
-                # v5.27: 15분 최종 타임아웃 (데이터: 8분+ 급감)
+                # 15분 최종 타임아웃 (거래량 무관)
                 if sell_reason is None and elapsed_min >= 15:
                     sell_reason = f"최종 타임아웃 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
 
