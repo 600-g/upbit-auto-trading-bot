@@ -4180,16 +4180,23 @@ class TradingBotV3:
                             print(f"  🤖 [SURGE AI차단] {coin}: {_ai_res['block_reason']}")
                             continue
 
-                    # ── v5.26: 재진입 조건 — 전 매도가보다 싸게만 ──
-                    # 팔고 나서 떨어졌을 때 다시 사는 것 (올라갔으면 안 삼)
+                    # ── v5.26: 재진입 조건 — 매도가 대비 -0.5%+ 눌림 + 거래량 살아있어야 ──
                     _prev_sell = self._surge_last_sell_price.get(coin, 0)
                     _entry_count = self._surge_coin_count.get(coin, 0)
-                    if _prev_sell > 0 and current_price >= _prev_sell:
-                        print(f"  🚫 {coin} 재진입({_entry_count+1}회차) 전매도가{_prev_sell:,.0f} ≤ 현재{current_price:,.0f} → 떨어질 때만 재진입")
-                        continue
                     if _entry_count > 0 and _prev_sell > 0:
-                        discount = (_prev_sell - current_price) / _prev_sell * 100
-                        print(f"  🔄 {coin} 재진입({_entry_count+1}회차) 전매도가 대비 -{discount:.1f}% 할인 → OK")
+                        discount = (_prev_sell - current_price) / _prev_sell
+                        if discount < 0.005:
+                            # 0.5% 미만 하락 = 의미 없는 눌림
+                            if discount <= 0:
+                                print(f"  🚫 {coin} 재진입({_entry_count+1}회차) 전매도가{_prev_sell:,.0f} ≤ 현재{current_price:,.0f} → 올라가면 안 삼")
+                            else:
+                                print(f"  ⏳ {coin} 재진입 대기: -{discount*100:.2f}% (0.5%+ 눌림 필요)")
+                            continue
+                        # 거래량 아직 살아있는지 확인 (급등 끝났으면 재진입 의미 없음)
+                        if vol_ratio < 1.5:
+                            print(f"  🚫 {coin} 재진입 거래량 {vol_ratio:.1f}배 < 1.5배 → 급등 끝남, 패스")
+                            continue
+                        print(f"  🔄 {coin} 재진입({_entry_count+1}회차) 매도가 대비 -{discount*100:.1f}% 눌림 + 거래량{vol_ratio:.1f}배 → OK")
 
                     # ── 통과! ──
                     candidates.append({
@@ -4398,18 +4405,36 @@ class TradingBotV3:
                 timeout_loss = 30 if is_early else 20     # 손실 타임아웃: 10→20분
                 timeout_flat = 45 if is_early else 30     # 횡보 타임아웃: 15→30분
 
-                # 1. v5.11: -1.5% 절대 손절 (v5.4 -2% → 강화, 평균 손실 축소)
-                if profit_rate <= -0.015:
-                    sell_reason = f"절대 손절 {profit_rate*100:+.2f}%"
+                # v5.26: 수익 퀵엑싯 — 최대한 수익일 때 팔기
+                # +1%+ 수익이면 고점 대비 -0.3% 하락 시 즉시 익절 (빡빡한 트레일링)
+                if profit_rate >= 0.01 and peak_rate >= 0.01:
+                    _trail_from_peak = peak_rate - profit_rate
+                    if _trail_from_peak >= 0.003:
+                        sell_reason = f"수익 퀵엑싯 (고점{peak_rate*100:+.1f}% → {profit_rate*100:+.1f}%, -{_trail_from_peak*100:.1f}%)"
+                # +0.5%+ 수익이면 1분봉 음봉 나오면 즉시 익절
+                elif profit_rate >= 0.005:
+                    try:
+                        _1m = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute1", count=2)
+                        if _1m is not None and len(_1m) >= 2:
+                            if _1m['close'].iloc[-1] < _1m['open'].iloc[-1]:
+                                sell_reason = f"수익 보호 ({profit_rate*100:+.2f}%, 1분봉 음봉)"
+                    except:
+                        pass
 
-                # v5.6: 최소 보유시간 (AutoTune 동적 조정, 기본 5분)
-                # 데이터: surge 5분내 -1%+ = 전패. 5분은 버텨야 함
-                elif elapsed_min < getattr(self, '_surge_min_hold', 5):
-                    print(f"  🚀 [SURGE] {coin}: {profit_rate*100:+.2f}% | 최소보유 대기 ({elapsed_min:.1f}분/{getattr(self, '_surge_min_hold', 5)}분)")
-                    continue
+                # 1. -1% 손절 (v5.24 타이트)
+                if sell_reason is None and profit_rate <= -0.01:
+                    sell_reason = f"손절 {profit_rate*100:+.2f}%"
 
-                # 2. v5.4: 스마트 손절 — 손절 구간(-1%~-2%)에서 거래량 보고 최적 타이밍
-                elif profit_rate <= -0.01:
+                # 최소보유 2분 (기존 5분→2분, 퀵엑싯 체계)
+                elif sell_reason is None and elapsed_min < 2:
+                    if profit_rate <= -0.015:
+                        sell_reason = f"급락 즉시컷 {profit_rate*100:+.2f}%"
+                    else:
+                        print(f"  🚀 [SURGE] {coin}: {profit_rate*100:+.2f}% | 최소보유 대기 ({elapsed_min:.1f}분/2분)")
+                        continue
+
+                # 2. 스마트 손절 — 거래량 보고 반등 대기
+                elif sell_reason is None and profit_rate <= -0.01:
                     vol_alive = False
                     try:
                         _ohlcv_1m = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute1", count=5)
