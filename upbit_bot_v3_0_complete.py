@@ -148,7 +148,7 @@ class TradingBotV3:
         self._surge_max = 1            # 동시 서지 포지션 최대 1개
         self._last_surge_entry = 0     # 마지막 서지 진입 시각
         self._surge_coin_count = {}    # v5.26: 코인별 surge 진입 횟수 (같은 코인 3회까지)
-        self._surge_last_buy_price = {} # v5.26: 코인별 마지막 surge 매수가 (재진입 조건 강화용)
+        self._surge_last_sell_price = {} # v5.26: 코인별 마지막 surge 매도가 (재진입: 매도가보다 싸게만)
         self._surge_watchlist = {}     # v5.3: 눌림목 대기열 {coin: {detected_price, peak_price, timestamp, surge_type, ...}}
 
         # v4.3: 과매매 방지
@@ -4180,20 +4180,16 @@ class TradingBotV3:
                             print(f"  🤖 [SURGE AI차단] {coin}: {_ai_res['block_reason']}")
                             continue
 
-                    # ── v5.26: 재진입 시 조건 강화 ──
-                    # 이전 매수가보다 비싸면 → 거래량 3배+, 양봉 2연속 필수
-                    _prev_buy = self._surge_last_buy_price.get(coin, 0)
+                    # ── v5.26: 재진입 조건 — 전 매도가보다 싸게만 ──
+                    # 팔고 나서 떨어졌을 때 다시 사는 것 (올라갔으면 안 삼)
+                    _prev_sell = self._surge_last_sell_price.get(coin, 0)
                     _entry_count = self._surge_coin_count.get(coin, 0)
-                    if _prev_buy > 0 and current_price >= _prev_buy:
-                        # 더 비싸게 재진입 → 빡빡하게
-                        if vol_ratio < 3.0:
-                            print(f"  🚫 {coin} 재진입({_entry_count+1}회차) 이전가{_prev_buy:,.0f}≤현재{current_price:,.0f}, 거래량{vol_ratio:.1f}배 < 3배 → 패스")
-                            continue
-                        # 5분봉 2연속 양봉 필수
-                        if not (closes[-1] > opens[-1] and closes[-2] > opens[-2]):
-                            print(f"  🚫 {coin} 재진입 2연속 양봉 아님 → 패스")
-                            continue
-                        print(f"  🔄 {coin} 재진입({_entry_count+1}회차) 조건 강화 통과 (거래량{vol_ratio:.1f}배, 2연속양봉)")
+                    if _prev_sell > 0 and current_price >= _prev_sell:
+                        print(f"  🚫 {coin} 재진입({_entry_count+1}회차) 전매도가{_prev_sell:,.0f} ≤ 현재{current_price:,.0f} → 떨어질 때만 재진입")
+                        continue
+                    if _entry_count > 0 and _prev_sell > 0:
+                        discount = (_prev_sell - current_price) / _prev_sell * 100
+                        print(f"  🔄 {coin} 재진입({_entry_count+1}회차) 전매도가 대비 -{discount:.1f}% 할인 → OK")
 
                     # ── 통과! ──
                     candidates.append({
@@ -4372,7 +4368,7 @@ class TradingBotV3:
                     }
                     self._last_surge_entry = now
                     self._surge_coin_count[coin] = self._surge_coin_count.get(coin, 0) + 1
-                    self._surge_last_buy_price[coin] = entry_price  # v5.26: 재진입 조건 강화용
+                    # v5.26: 매도가는 매도 시 기록 (_surge_last_sell_price)
                     discount = (watch['detected_price'] - entry_price) / watch['detected_price'] * 100
                     self._db_log_trade(coin, "buy", entry_price, quantity, surge_budget, momentum=_m_score, batch='surge_trade')
                     self._notify(f"[SURGE BUY] {coin} {self._surge_coin_count[coin]}/3회 | {surge_budget:,}원 @ {entry_price:,.0f} | 할인 {discount:.1f}%")
@@ -4496,9 +4492,11 @@ class TradingBotV3:
                     self._notify(f"[SURGE {tag}] {coin} {sell_reason} | {pnl:+,}원")
                     del self._surge_positions[coin]
                     self._save_positions()
+                    # v5.26: 매도가 기록 (재진입 시 이보다 싸게만 진입)
+                    self._surge_last_sell_price[coin] = price
+
                     if profit_rate <= 0:
                         self._sell_cooldown[coin] = {'time': now, 'stoploss': True, 'source': 'surge', 'exit_price': price}
-                        # v5.24: 패배 카운터 (당일 1패 재진입 금지는 batch만, surge는 3회까지)
                         self._surge_loss_streak = getattr(self, '_surge_loss_streak', 0) + 1
                         if self._surge_loss_streak >= 2:
                             self._surge_blocked_until = now + 1800
