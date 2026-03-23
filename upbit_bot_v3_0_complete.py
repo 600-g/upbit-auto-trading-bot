@@ -147,7 +147,8 @@ class TradingBotV3:
         self._surge_positions = {}     # {coin: {buy_price, amount, quantity, timestamp, peak_rate}}
         self._surge_max = 1            # 동시 서지 포지션 최대 1개
         self._last_surge_entry = 0     # 마지막 서지 진입 시각
-        self._surge_coin_count = {}    # v5.1: 코인별 surge 진입 횟수 (같은 코인 2회 제한)
+        self._surge_coin_count = {}    # v5.26: 코인별 surge 진입 횟수 (같은 코인 3회까지)
+        self._surge_last_buy_price = {} # v5.26: 코인별 마지막 surge 매수가 (재진입 조건 강화용)
         self._surge_watchlist = {}     # v5.3: 눌림목 대기열 {coin: {detected_price, peak_price, timestamp, surge_type, ...}}
 
         # v4.3: 과매매 방지
@@ -4070,7 +4071,7 @@ class TradingBotV3:
         try:
             owned = set(self.positions.keys()) | set(self._scalp_positions.keys()) | set(self._surge_positions.keys()) | set(self._surge_watchlist.keys())
             cooldown_coins = set(self._sell_cooldown.keys())
-            maxed_coins = {c for c, n in self._surge_coin_count.items() if n >= 2}
+            maxed_coins = {c for c, n in self._surge_coin_count.items() if n >= 3}  # v5.26: 3회까지
             _blacklist = self._permanent_blacklist | self._autotune_blacklist
             candidates = []
 
@@ -4179,6 +4180,21 @@ class TradingBotV3:
                             print(f"  🤖 [SURGE AI차단] {coin}: {_ai_res['block_reason']}")
                             continue
 
+                    # ── v5.26: 재진입 시 조건 강화 ──
+                    # 이전 매수가보다 비싸면 → 거래량 3배+, 양봉 2연속 필수
+                    _prev_buy = self._surge_last_buy_price.get(coin, 0)
+                    _entry_count = self._surge_coin_count.get(coin, 0)
+                    if _prev_buy > 0 and current_price >= _prev_buy:
+                        # 더 비싸게 재진입 → 빡빡하게
+                        if vol_ratio < 3.0:
+                            print(f"  🚫 {coin} 재진입({_entry_count+1}회차) 이전가{_prev_buy:,.0f}≤현재{current_price:,.0f}, 거래량{vol_ratio:.1f}배 < 3배 → 패스")
+                            continue
+                        # 5분봉 2연속 양봉 필수
+                        if not (closes[-1] > opens[-1] and closes[-2] > opens[-2]):
+                            print(f"  🚫 {coin} 재진입 2연속 양봉 아님 → 패스")
+                            continue
+                        print(f"  🔄 {coin} 재진입({_entry_count+1}회차) 조건 강화 통과 (거래량{vol_ratio:.1f}배, 2연속양봉)")
+
                     # ── 통과! ──
                     candidates.append({
                         'coin': coin,
@@ -4188,9 +4204,10 @@ class TradingBotV3:
                         'pullback': 0,
                         'score': int(vol_ratio * 3 + price_chg_10m * 100),
                         'surge_type': 'rapid',
-                        'momentum': 0,  # surge는 모멘텀 미사용
+                        'momentum': 0,
                     })
-                    print(f"🚀 [SURGE 감지] {coin}: 양봉✓ 거래량{vol_ratio:.1f}배✓ 10분+{price_chg_10m*100:.1f}%✓ → 진입 후보!")
+                    _label = f"({_entry_count+1}회차)" if _entry_count > 0 else ""
+                    print(f"🚀 [SURGE 감지] {coin}{_label}: 양봉✓ 거래량{vol_ratio:.1f}배✓ 10분+{price_chg_10m*100:.1f}%✓ → 진입 후보!")
 
                 except Exception:
                     continue
@@ -4355,9 +4372,10 @@ class TradingBotV3:
                     }
                     self._last_surge_entry = now
                     self._surge_coin_count[coin] = self._surge_coin_count.get(coin, 0) + 1
+                    self._surge_last_buy_price[coin] = entry_price  # v5.26: 재진입 조건 강화용
                     discount = (watch['detected_price'] - entry_price) / watch['detected_price'] * 100
                     self._db_log_trade(coin, "buy", entry_price, quantity, surge_budget, momentum=_m_score, batch='surge_trade')
-                    self._notify(f"[SURGE BUY 눌림목] {coin} | {surge_budget:,}원 @ {entry_price:,.0f} | 할인 {discount:.1f}% ({self._surge_coin_count[coin]}/2회)")
+                    self._notify(f"[SURGE BUY] {coin} {self._surge_coin_count[coin]}/3회 | {surge_budget:,}원 @ {entry_price:,.0f} | 할인 {discount:.1f}%")
                     print(f"🚀 [SURGE 눌림목 매수] {coin} | {surge_budget:,}원 @ {entry_price:,.0f} | 감지가 대비 -{discount:.1f}%")
                     del self._surge_watchlist[coin]
                     self._save_positions()
@@ -4480,14 +4498,15 @@ class TradingBotV3:
                     self._save_positions()
                     if profit_rate <= 0:
                         self._sell_cooldown[coin] = {'time': now, 'stoploss': True, 'source': 'surge', 'exit_price': price}
-                        # v5.9: surge 연속 손실 카운터 (2회 시 30분 진입 차단)
+                        # v5.24: 패배 카운터 (당일 1패 재진입 금지는 batch만, surge는 3회까지)
                         self._surge_loss_streak = getattr(self, '_surge_loss_streak', 0) + 1
                         if self._surge_loss_streak >= 2:
                             self._surge_blocked_until = now + 1800
                             print(f"🚨 [SURGE] 연속 {self._surge_loss_streak}회 손실 → 30분 진입 차단")
-                            self._notify(f"[SURGE 차단] 연속 {self._surge_loss_streak}회 손실 → 30분 중단")
                     else:
-                        self._surge_loss_streak = 0  # 수익 시 초기화
+                        self._surge_loss_streak = 0
+                        # v5.26: 수익 매도 → 쿨다운 없음 (즉시 재진입 가능, 등락 반복 수익화)
+                        # _sell_cooldown 설정 안 함
                     continue
 
                 print(f"  🚀 [SURGE] {coin}: {profit_rate*100:+.2f}% | 고점 {peak_rate*100:+.2f}% | {elapsed_min:.0f}분")
@@ -4511,8 +4530,9 @@ class TradingBotV3:
                 print(f"🚨 [SURGE] 연속 손실 차단 중 (잔여 {remaining}분) → 신규 진입 중단")
                 return
 
-            # 5분 쿨타임
-            if now - self._last_surge_entry < 300:
+            # v5.26: 쿨타임 — 손실 후 5분, 수익 후 1분 (등락 반복 수익화)
+            _surge_cooltime = 60 if getattr(self, '_surge_loss_streak', 0) == 0 else 300
+            if now - self._last_surge_entry < _surge_cooltime:
                 return
 
             # 텔레그램 일시중지 체크
@@ -4554,11 +4574,9 @@ class TradingBotV3:
                 surge_budget = int(surge_budget * 0.7)
                 print(f"🌆 [SURGE] 저녁 모드: 점수 {target.get('score',0)}점 ≥ 8 OK, 예산 70% {surge_budget:,}원")
             elif _is_morning:
-                # v5.11: 오전(8~13시) surge 완전 차단 (09시대 -224k 데이터 기반)
-                print(f"🚀 [SURGE] {coin} 오전({_hour}시) → surge 완전 차단")
-                return
-                surge_budget = int(surge_budget * 0.6)
-                print(f"🌅 [SURGE] 오전 모드: 점수 {target.get('score',0)}점 ≥ 8 OK, 예산 60% {surge_budget:,}원")
+                # v5.26: 오전 surge 허용 (v5.25 3조건 체계로 품질 보장됨, 예산 70%)
+                surge_budget = int(surge_budget * 0.7)
+                print(f"🌅 [SURGE] 오전 모드: 예산 70% {surge_budget:,}원")
 
             # v5.3: 즉시 매수 대신 눌림목 워치리스트에 추가
             if coin in self._surge_watchlist:
