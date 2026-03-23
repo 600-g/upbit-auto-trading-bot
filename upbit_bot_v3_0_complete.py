@@ -4060,17 +4060,21 @@ class TradingBotV3:
             print(f"⚠️ 유휴자금 중타 오류: {e}")
 
     def _detect_surge_coins(self):
-        """v5.0: 전체 코인 급등 탐지 — ticker API 1차 필터 + 점수제 + 초기 급등 감지"""
+        """v5.25: surge 감지 — 모멘텀 점수 없이 3조건(방향+힘+타이밍)만으로 판단
+
+        설계 원칙:
+        - 모멘텀 점수는 batch용(앞으로 오를까?), surge는 "지금 올라가고 있나?"만 봄
+        - RSI/고점/추세 패널티 없음 — 올라가는 코인이니까 당연히 RSI 높고 고점 근처
+        - 3조건: ① 5분봉 양봉(방향) ② 거래량 2배+(힘) ③ 10분 내 +2%+(타이밍)
+        """
         try:
             owned = set(self.positions.keys()) | set(self._scalp_positions.keys()) | set(self._surge_positions.keys()) | set(self._surge_watchlist.keys())
             cooldown_coins = set(self._sell_cooldown.keys())
-            # v5.1: 같은 코인 2회 초과 진입 차단
             maxed_coins = {c for c, n in self._surge_coin_count.items() if n >= 2}
-            # v5.10: 영구+AutoTune 블랙리스트 적용 (SHIB 등 surge 경로 우회 방지)
             _blacklist = self._permanent_blacklist | self._autotune_blacklist
             candidates = []
 
-            # ── 1단계: ticker API로 전체 코인 1차 필터 (API 1회) ──
+            # ── 1차: ticker API 전체 스캔 (API 1회) ──
             import requests as _req
             try:
                 _markets = ",".join(f"KRW-{c}" for c in self.coins)
@@ -4080,7 +4084,8 @@ class TradingBotV3:
             except Exception:
                 _tickers = []
 
-            # 1차 필터: 상승 중(+3%) + 거래대금 50억 이상 (v5.7: 강화)
+            # v5.25: 거래대금 10억으로 완화 (50억→10억, WAXP 44억/ZETA 14억 포착)
+            # 상승률 +2% 이상 (3%→2%, 초기 급등 포착)
             pre_candidates = []
             for t in _tickers:
                 coin = t['market'].replace('KRW-', '')
@@ -4090,14 +4095,16 @@ class TradingBotV3:
                     continue
                 if hasattr(self, '_warning_coins') and coin in self._warning_coins:
                     continue
+                # v5.24: 당일 1패 코인 차단
+                if self._daily_coin_losses.get(coin, 0) >= 1:
+                    continue
                 chg = t.get('signed_change_rate', 0)
                 trade_price = t.get('acc_trade_price_24h', 0)
-                if chg >= 0.03 and trade_price >= 5_000_000_000:
+                if chg >= 0.02 and trade_price >= 1_000_000_000:
                     pre_candidates.append((coin, chg, trade_price))
 
-            # 상승률 순 상위 25개만 상세 분석
             pre_candidates.sort(key=lambda x: x[1], reverse=True)
-            scan_list = pre_candidates[:25]
+            scan_list = pre_candidates[:15]
 
             if not scan_list:
                 return []
@@ -4107,198 +4114,89 @@ class TradingBotV3:
             for coin, ticker_chg, ticker_trade_price in scan_list:
                 ticker = f"KRW-{coin}"
                 try:
-                    # ── 2단계: 5분봉 상세 분석 (점수제) ──
+                    # ── 2차: 5분봉 3조건 체크 ──
                     ohlcv_5m = pyupbit.get_ohlcv(ticker, interval="minute5", count=6)
                     if ohlcv_5m is None or len(ohlcv_5m) < 4:
                         continue
 
-                    closes_5m = list(ohlcv_5m['close'])
-                    opens_5m = list(ohlcv_5m['open'])
-                    highs_5m = list(ohlcv_5m['high'])
-                    volumes_5m = list(ohlcv_5m['volume'])
-                    current_price = closes_5m[-1]
+                    closes = list(ohlcv_5m['close'])
+                    opens = list(ohlcv_5m['open'])
+                    highs = list(ohlcv_5m['high'])
+                    volumes = list(ohlcv_5m['volume'])
+                    current_price = closes[-1]
 
-                    # 10분 가격 변동
-                    if len(closes_5m) >= 3:
-                        price_change_10m = (closes_5m[-1] - closes_5m[-3]) / closes_5m[-3]
-                    else:
-                        price_change_10m = (closes_5m[-1] - closes_5m[-2]) / closes_5m[-2]
+                    # ── 조건1: 방향 — 최근 5분봉 양봉인가? ──
+                    is_bullish = closes[-1] > opens[-1]
+                    if not is_bullish:
+                        continue
 
-                    # 거래량 비율
-                    avg_vol = np.mean(volumes_5m[:-2]) if len(volumes_5m) > 2 else np.mean(volumes_5m)
-                    recent_vol = np.mean(volumes_5m[-2:])
+                    # ── 조건2: 힘 — 거래량이 평소 2배 이상인가? ──
+                    avg_vol = np.mean(volumes[:-2]) if len(volumes) > 2 else np.mean(volumes)
+                    recent_vol = np.mean(volumes[-2:])
                     vol_ratio = recent_vol / avg_vol if avg_vol > 0 else 0
+                    if vol_ratio < 2.0:
+                        continue
 
-                    # 필수 조건: 10분 +2.5% 이상 (v5.7: 1.5→2.5% 강화)
-                    if price_change_10m < 0.025:
-                        # 10분 급등이 아니면 → 초기 급등(1시간봉) 체크로 넘김
-                        pass
-                    else:
-                        # ── 점수 산정 (10분 급등형) ──
-                        score = 0
+                    # ── 조건3: 타이밍 — 10분 내 +2% 이상? ──
+                    price_chg_10m = (closes[-1] - closes[-3]) / closes[-3] if len(closes) >= 3 else 0
+                    if price_chg_10m < 0.02:
+                        continue
 
-                        # 5분봉 2연속 양봉: +2점
-                        if closes_5m[-1] > opens_5m[-1] and closes_5m[-2] > opens_5m[-2]:
-                            score += 2
+                    # ── 안전 필터 (최소한만) ──
 
-                        # 거래량 배율
-                        if vol_ratio >= 3:
-                            score += 5
-                        elif vol_ratio >= 2:
-                            score += 3
-                        elif vol_ratio >= 1.5:
-                            score += 1
-
-                        # 10분 상승률
-                        if price_change_10m >= 0.05:
-                            score += 4
-                        elif price_change_10m >= 0.03:
-                            score += 3
-                        elif price_change_10m >= 0.02:
-                            score += 2
-
-                        # 눌림목 가산 (필수 아님)
-                        prev_high = highs_5m[-2]
-                        pullback = (current_price - prev_high) / prev_high
-                        if -0.02 <= pullback <= -0.005:
-                            score += 3
-
-                        # ── v5.10: 과매수/감속/고점 필터 (DB 분석 기반) ──
-
-                        # 1) RSI 과매수 필터: surge는 RSI 미참조였음 → 통합
-                        try:
-                            _rsi_ohlcv = pyupbit.get_ohlcv(ticker, interval="minute5", count=14)
-                            if _rsi_ohlcv is not None and len(_rsi_ohlcv) >= 7:
-                                _rsi_closes = list(_rsi_ohlcv['close'])
-                                _rsi_delta = np.diff(_rsi_closes)
-                                _rsi_gain = np.where(_rsi_delta > 0, _rsi_delta, 0).mean()
-                                _rsi_loss = np.where(_rsi_delta < 0, -_rsi_delta, 0).mean()
-                                _rsi_val = 100 - (100 / (1 + _rsi_gain / _rsi_loss)) if _rsi_loss > 0 else 99
-                                # v5.11: RSI 임계값 80→70 (스파이크 초입 RSI 70대 통과 방지)
-                                if _rsi_val >= 70:
-                                    print(f"  🚫 {coin} RSI {_rsi_val:.0f} ≥ 70 (과매수) → 차단")
-                                    continue
-                                elif _rsi_val >= 60:
-                                    score -= 3
-                                elif _rsi_val < 40:
-                                    score += 2
-                        except:
-                            pass
-
-                        # 2) 급등 감속 필터: 이전 봉 대비 현재 봉 상승률 절반 미만 → 꺾이는 중
-                        if len(closes_5m) >= 3 and opens_5m[-2] > 0 and opens_5m[-1] > 0:
-                            _prev_chg = (closes_5m[-2] - opens_5m[-2]) / opens_5m[-2]
-                            _curr_chg = (closes_5m[-1] - opens_5m[-1]) / opens_5m[-1]
-                            if _prev_chg > 0.005 and _curr_chg < _prev_chg * 0.5:
-                                print(f"  🚫 {coin} 급등 감속 (이전봉 +{_prev_chg*100:.1f}% → 현재봉 +{_curr_chg*100:.1f}%) → 차단")
-                                continue
-
-                        # 3) 24h 고점 대비 위치: 고점의 97%+ → 천장 근접 차단
-                        try:
-                            _24h = pyupbit.get_ohlcv(ticker, interval="minute60", count=24)
-                            if _24h is not None and len(_24h) >= 4:
-                                _24h_high = _24h['high'].max()
-                                if _24h_high > 0 and current_price >= _24h_high * 0.97:
-                                    print(f"  🚫 {coin} 24h 고점 근접 ({current_price:,.0f} ≥ {_24h_high:,.0f}×97%) → 차단")
-                                    continue
-                        except:
-                            pass
-
-                        # 4) 윗꼬리(매도압력) 필터: 마지막 5분봉 윗꼬리 비율 50%+
-                        _body = abs(closes_5m[-1] - opens_5m[-1])
-                        _upper_shadow = highs_5m[-1] - max(closes_5m[-1], opens_5m[-1])
-                        _total_range = highs_5m[-1] - min(closes_5m[-1], opens_5m[-1])
-                        if _total_range > 0 and _upper_shadow / _total_range >= 0.5:
-                            score -= 3
-                            print(f"  ⚠️ {coin} 윗꼬리 {_upper_shadow/_total_range*100:.0f}% (매도압력) → -3점")
-
-                        # 점수 문턱: 7점 이상 (v5.7: 5→7 강화)
-                        if score < 7:
-                            continue
-
-                        # ── 펌프앤덤프 필터 (기존 유지) ──
-                        volatility = self.check_extreme_volatility(coin)
-                        if volatility in ("halt", "emergency_sell"):
-                            continue
-
-                        # 1분봉 음봉 2/3 → 이미 꺾임
-                        try:
-                            ohlcv_1m = pyupbit.get_ohlcv(ticker, interval="minute1", count=3)
-                            if ohlcv_1m is not None and len(ohlcv_1m) >= 3:
-                                bearish_count = sum(1 for i in range(len(ohlcv_1m))
-                                                    if ohlcv_1m['close'].iloc[i] < ohlcv_1m['open'].iloc[i])
-                                if bearish_count >= 2:
-                                    continue
-                        except:
-                            pass
-
-                        # 고점 대비 -2% 이상 하락 → 추격 방지
-                        recent_high = max(highs_5m[-3:]) if len(highs_5m) >= 3 else max(highs_5m)
-                        if recent_high > 0 and (current_price - recent_high) / recent_high < -0.02:
-                            continue
-
-                        # 5) v5.10: 종합 모멘텀 게이트 (기존 모멘텀 미참조 → 통합)
-                        _surge_momentum = self.calculate_momentum(coin)
-                        if _surge_momentum < 30:
-                            print(f"  🚫 {coin} 종합 모멘텀 {_surge_momentum}점 < 30점 → 차단")
-                            continue
-
-                        candidates.append({
-                            'coin': coin,
-                            'price': current_price,
-                            'change_10m': price_change_10m,
-                            'vol_ratio': vol_ratio,
-                            'pullback': pullback,
-                            'score': score,
-                            'surge_type': 'rapid',
-                            'momentum': _surge_momentum,
-                        })
-                        print(f"🚀 [SURGE 감지] {coin}: 10분 +{price_change_10m*100:.1f}%, 거래량 {vol_ratio:.1f}배, 점수 {score}점, RSI/모멘텀 OK")
-                        continue  # 10분 급등으로 이미 추가됨, 초기 급등 체크 불필요
-
-                    # ── 3단계: 초기 급등 감지 (1시간봉 기준, 서서히 오르는 코인) ──
+                    # 1분봉 3개 중 2개 이상 음봉이면 이미 꺾임
                     try:
-                        ohlcv_1h = pyupbit.get_ohlcv(ticker, interval="minute60", count=4)
-                        if ohlcv_1h is not None and len(ohlcv_1h) >= 2:
-                            change_1h = (ohlcv_1h['close'].iloc[-1] - ohlcv_1h['close'].iloc[-2]) / ohlcv_1h['close'].iloc[-2]
-                            vol_1h = ohlcv_1h['volume'].iloc[-1]
-                            avg_vol_1h = ohlcv_1h['volume'].iloc[:-1].mean() if len(ohlcv_1h) > 1 else vol_1h
-
-                            # 1시간 +5% 이상 + 거래량 2배 + 아직 고점 근처 (v5.7: 강화)
-                            if change_1h >= 0.05 and (avg_vol_1h <= 0 or vol_1h >= avg_vol_1h * 2.0):
-                                # 아직 고점 근처인지 (급등 초기 확인)
-                                if ohlcv_1h['close'].iloc[-1] >= ohlcv_1h['high'].iloc[-1] * 0.98:
-                                    # 펌프앤덤프 필터
-                                    volatility = self.check_extreme_volatility(coin)
-                                    if volatility in ("halt", "emergency_sell"):
-                                        continue
-
-                                    vol_1h_ratio = vol_1h / avg_vol_1h if avg_vol_1h > 0 else 1
-                                    # v5.10: 초기급등도 모멘텀 게이트 적용
-                                    _early_mom = self.calculate_momentum(coin)
-                                    if _early_mom < 30:
-                                        print(f"  🚫 {coin} 초기급등 모멘텀 {_early_mom}점 < 30점 → 차단")
-                                        continue
-                                    candidates.append({
-                                        'coin': coin,
-                                        'price': current_price,
-                                        'change_10m': change_1h,
-                                        'vol_ratio': vol_1h_ratio,
-                                        'pullback': 0,
-                                        'score': 6,
-                                        'surge_type': 'early',
-                                        'momentum': _early_mom,
-                                    })
-                                    print(f"🚀 [SURGE 초기급등] {coin}: 1h +{change_1h*100:.1f}%, 거래량 {vol_1h_ratio:.1f}배, 모멘텀 {_early_mom}점")
+                        ohlcv_1m = pyupbit.get_ohlcv(ticker, interval="minute1", count=3)
+                        if ohlcv_1m is not None and len(ohlcv_1m) >= 3:
+                            bearish = sum(1 for _, r in ohlcv_1m.iterrows() if r['close'] < r['open'])
+                            if bearish >= 2:
+                                print(f"  🚫 {coin} 1분봉 {bearish}/3 음봉 → 꺾임, 패스")
+                                continue
                     except:
                         pass
+
+                    # 윗꼬리 60%+ → 매도압력 강함
+                    _upper = highs[-1] - max(closes[-1], opens[-1])
+                    _range = highs[-1] - min(closes[-1], opens[-1])
+                    if _range > 0 and _upper / _range >= 0.6:
+                        print(f"  🚫 {coin} 윗꼬리 {_upper/_range*100:.0f}% → 매도압력, 패스")
+                        continue
+
+                    # 극단 변동 체크
+                    volatility = self.check_extreme_volatility(coin)
+                    if volatility in ("halt", "emergency_sell"):
+                        continue
+
+                    # ── AI 토론 (v5.24: surge도 AI 필수) ──
+                    if hasattr(self, 'ai_agents') and self.ai_agents and self.ai_agents.enabled:
+                        _ai_ind = {
+                            'rsi': 0, 'volume_score': min(100, vol_ratio * 30),
+                            'momentum': price_chg_10m * 1000,  # 상승률을 점수화
+                            'market_state': getattr(self, 'last_market_state', '보통')
+                        }
+                        _ai_res = self.ai_agents.pre_buy_check(coin, _ai_ind)
+                        if not _ai_res['approved']:
+                            print(f"  🤖 [SURGE AI차단] {coin}: {_ai_res['block_reason']}")
+                            continue
+
+                    # ── 통과! ──
+                    candidates.append({
+                        'coin': coin,
+                        'price': current_price,
+                        'change_10m': price_chg_10m,
+                        'vol_ratio': vol_ratio,
+                        'pullback': 0,
+                        'score': int(vol_ratio * 3 + price_chg_10m * 100),
+                        'surge_type': 'rapid',
+                        'momentum': 0,  # surge는 모멘텀 미사용
+                    })
+                    print(f"🚀 [SURGE 감지] {coin}: 양봉✓ 거래량{vol_ratio:.1f}배✓ 10분+{price_chg_10m*100:.1f}%✓ → 진입 후보!")
 
                 except Exception:
                     continue
 
-                time.sleep(0.1)  # API 호출 간격
+                time.sleep(0.1)
 
-            # 점수 높은 순으로 정렬, 최대 2개 반환
             if candidates:
                 candidates.sort(key=lambda x: x['score'], reverse=True)
                 return candidates[:2]
@@ -4371,31 +4269,21 @@ class TradingBotV3:
                         del self._surge_watchlist[coin]
                         continue
 
-                    # v5.24: surge 진입 품질 강화 — 모멘텀 30+ 필수
+                    # v5.25: surge는 모멘텀 점수 미사용 — 감지 단계에서 이미 3조건 통과
+                    _m_score = 0  # surge는 모멘텀 불필요
+
+                    # v5.25: 1분봉 양봉 확인만 (모멘텀/RSI 체크 제거)
                     try:
-                        _m_score = self.calculate_momentum(coin)
+                        _entry_1m = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute1", count=2)
+                        if _entry_1m is not None and len(_entry_1m) >= 2:
+                            if _entry_1m['close'].iloc[-1] < _entry_1m['open'].iloc[-1]:
+                                print(f"🚀 [SURGE 대기] {coin} 1분봉 음봉 → 반등 대기")
+                                watch['entry_ready'] = False
+                                continue
                     except:
-                        _m_score = 0
-                    if _m_score < 30:
-                        print(f"🚀 [SURGE 차단] {coin} 모멘텀 {_m_score}점 < 30 → 진입 포기")
-                        del self._surge_watchlist[coin]
-                        continue
+                        pass
 
-                    # v5.24: AI 토론 검증 (surge도 AI 통과 필수)
-                    if hasattr(self, 'ai_agents') and self.ai_agents and self.ai_agents.enabled:
-                        _ai_ind = {
-                            'rsi': self.analyze_rsi(coin),
-                            'volume_score': self.analyze_volume(coin),
-                            'momentum': _m_score,
-                            'market_state': getattr(self, 'last_market_state', '보통')
-                        }
-                        _ai_res = self.ai_agents.pre_buy_check(coin, _ai_ind)
-                        if not _ai_res['approved']:
-                            print(f"🚀 [SURGE AI차단] {coin}: {_ai_res['block_reason']}")
-                            del self._surge_watchlist[coin]
-                            continue
-
-                    # v5.24: 당일 1패 코인 surge도 차단
+                    # 당일 1패 코인 차단
                     if self._daily_coin_losses.get(coin, 0) >= 1:
                         print(f"🚀 [SURGE 차단] {coin} 오늘 이미 패배 → 재진입 금지")
                         del self._surge_watchlist[coin]
