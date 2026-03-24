@@ -3197,8 +3197,15 @@ class TradingBotV3:
         # 미국 시장 연동
         us_state, us_adjust = self.check_us_market()
         min_score = max(0, min(100, min_score + us_adjust))
-        # v5.23: 최소 기준 캡 40 (데이터: 30미만 283건 -605k, 40+ 44건 +481k)
-        min_score = min(min_score, 40)
+        # v5.28: 시장 적응형 기준 (고정 40 → 시장 상태별)
+        # 데이터: 40+ = +481k, 30-39 = +72k, <30 = -605k
+        # 강세장에선 30+도 수익 가능, 약세장에선 40+ 필수
+        if market_strength == "강세":
+            min_score = min(min_score, 30)   # 강세: 30+ (적극 진입)
+        elif market_strength == "보통":
+            min_score = min(min_score, 35)   # 보통: 35+
+        else:
+            min_score = min(min_score, 40)   # 약세/극약세: 40+ (방어적)
 
         print(f"📈 시장 상태: {market_strength} | 미국: {us_state} → 최소 신호: {min_score}점")
 
@@ -3214,15 +3221,11 @@ class TradingBotV3:
             print(f"🌙 심야({_cur_hour:02d}시) → 코인 스캔/진입 생략 (포지션 관리만)")
             return
         elif _cur_hour >= 18:
-            min_score = min(min_score + 5, 45)  # v5.23: 저녁 강화
-            print(f"🌆 저녁({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
+            min_score += 3  # 저녁: 약간 강화
+            print(f"🌆 저녁({_cur_hour:02d}시) → 모멘텀 기준: {min_score}점")
         elif 8 <= _cur_hour < 13:
-            min_score = min(min_score + 7, 47)  # v5.23: 오전 강화
-            print(f"🌅 오전({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점")
-        elif _cur_hour in (13, 15, 16, 17):
-            # v5.23: 오후도 최소 35 유지 (기존 완화 제거)
-            min_score = max(min_score, 35)
-            print(f"☀️ 오후({_cur_hour:02d}시) → 모멘텀 기준: {min_score}점")
+            min_score += 5  # 오전: 강화
+            print(f"🌅 오전({_cur_hour:02d}시) → 모멘텀 기준: {min_score}점")
         # v5.6: AutoTune 시간대 부스트 (새벽 등 전패 구간 자동 감지)
         _time_boost = getattr(self, '_autotune_time_boost', {})
         if _time_boost:
@@ -3501,8 +3504,14 @@ class TradingBotV3:
 
                     signal_count = len(signals)
 
-                    # v5.23: 모멘텀 50+ 시그널 1개, 40~49 시그널 2개 (데이터: 40+ +481k)
-                    min_signals = 1 if momentum >= 50 else 2
+                    # v5.28: 시장 적응형 시그널 요구
+                    # 강세장: 시그널 1개 (기회 잡기), 약세장: 2개 (방어)
+                    if market_strength == "강세":
+                        min_signals = 1
+                    elif momentum >= 50:
+                        min_signals = 1
+                    else:
+                        min_signals = 2
                     if signal_count < min_signals:
                         print(f" ⚠️ 시그널 {signal_count}개({', '.join(signals) if signals else '없음'}) → {min_signals}개 이상 필요, 매수 보류")
                         continue
@@ -3550,14 +3559,15 @@ class TradingBotV3:
                 if buy_amount < 5000:
                     print(f" 💸 매수금액 부족 ({buy_amount:,}원) → 패스")
                     continue
-                # v5.4: 저항선이 현재가 +2% 미만이면 진입 차단 (0원 즉시매도 근본 방지)
+                # v5.28: 저항선 필터 — 강세장에선 돌파 가능성 높으므로 완화
+                _resist_threshold = 0.01 if market_strength == "강세" else 0.02
                 try:
                     _sr_check = self._calc_sr_levels(coin)
                     _cur_price = self.get_price(coin)
                     if _sr_check and _cur_price and _sr_check.get('nearest_resistance'):
                         _upside = (_sr_check['nearest_resistance'] - _cur_price) / _cur_price
-                        if _upside < 0.02:
-                            print(f" ⚠️ 저항선 {_sr_check['nearest_resistance']:,.0f} 너무 가까움 (+{_upside*100:.2f}%) → 패스")
+                        if _upside < _resist_threshold:
+                            print(f" ⚠️ 저항선 {_sr_check['nearest_resistance']:,.0f} 너무 가까움 (+{_upside*100:.2f}% < {_resist_threshold*100:.0f}%) → 패스")
                             continue
                 except:
                     pass
@@ -4174,7 +4184,7 @@ class TradingBotV3:
                     # ── AI 토론 (v5.24: surge도 AI 필수) ──
                     if hasattr(self, 'ai_agents') and self.ai_agents and self.ai_agents.enabled:
                         _ai_ind = {
-                            'rsi': 0, 'volume_score': min(100, vol_ratio * 30),
+                            'rsi': 50, 'volume_score': min(100, vol_ratio * 30),  # surge는 RSI 미사용, 중립값
                             'momentum': price_chg_10m * 1000,  # 상승률을 점수화
                             'market_state': getattr(self, 'last_market_state', '보통')
                         }
