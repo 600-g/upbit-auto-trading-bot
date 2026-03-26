@@ -3197,15 +3197,18 @@ class TradingBotV3:
         # 미국 시장 연동
         us_state, us_adjust = self.check_us_market()
         min_score = max(0, min(100, min_score + us_adjust))
-        # v5.28: 시장 적응형 기준 (고정 40 → 시장 상태별)
-        # 데이터: 40+ = +481k, 30-39 = +72k, <30 = -605k
-        # 강세장에선 30+도 수익 가능, 약세장에선 40+ 필수
+        # v5.30: batch가 수익 엔진 — 기준 되돌림
+        # 데이터: batch 381건 +47만(이전) vs 0건(현재) → batch가 꺼지면 surge 손실만 남음
+        # 이전 평균 진입 모멘텀 23~34점, 승률 51%로 수익
+        # 검증된 개선(1패 차단/수수료 방지/30분 타임아웃)은 유지
         if market_strength == "강세":
-            min_score = min(min_score, 30)   # 강세: 30+ (적극 진입)
+            min_score = min(min_score, 22)   # 강세: 적극 (이전 수준)
         elif market_strength == "보통":
-            min_score = min(min_score, 35)   # 보통: 35+
+            min_score = min(min_score, 25)   # 보통: 이전과 유사
+        elif market_strength in ("약세", "심약세"):
+            min_score = min(min_score, 30)   # 약세: 약간 방어
         else:
-            min_score = min(min_score, 40)   # 약세/극약세: 40+ (방어적)
+            min_score = min(min_score, 35)   # 극약세: 방어적
 
         print(f"📈 시장 상태: {market_strength} | 미국: {us_state} → 최소 신호: {min_score}점")
 
@@ -3504,14 +3507,9 @@ class TradingBotV3:
 
                     signal_count = len(signals)
 
-                    # v5.28: 시장 적응형 시그널 요구
-                    # 강세장: 시그널 1개 (기회 잡기), 약세장: 2개 (방어)
-                    if market_strength == "강세":
-                        min_signals = 1
-                    elif momentum >= 50:
-                        min_signals = 1
-                    else:
-                        min_signals = 2
+                    # v5.30: 시그널 1개면 충분 (이전 버전 수준)
+                    # 2개 요구는 기회를 너무 줄임
+                    min_signals = 1
                     if signal_count < min_signals:
                         print(f" ⚠️ 시그널 {signal_count}개({', '.join(signals) if signals else '없음'}) → {min_signals}개 이상 필요, 매수 보류")
                         continue
@@ -3559,8 +3557,8 @@ class TradingBotV3:
                 if buy_amount < 5000:
                     print(f" 💸 매수금액 부족 ({buy_amount:,}원) → 패스")
                     continue
-                # v5.28: 저항선 필터 — 강세장에선 돌파 가능성 높으므로 완화
-                _resist_threshold = 0.01 if market_strength == "강세" else 0.02
+                # v5.30: 저항선 필터 완화 — 1%로 통일 (2%는 기회 과도 제한)
+                _resist_threshold = 0.01
                 try:
                     _sr_check = self._calc_sr_levels(coin)
                     _cur_price = self.get_price(coin)
