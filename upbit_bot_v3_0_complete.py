@@ -185,6 +185,10 @@ class TradingBotV3:
             'abnormal': 0.05, 'pa_context': 0.03
         }
 
+        # v6.0: 스캔 점수 분포 저장 (상대적 기준용)
+        self._last_scan_scores = {}
+        self._last_percentile_threshold = 0
+
         # v4.0: 프라이스 액션 캐시
         self._sr_cache = {}       # {coin: (timestamp, sr_dict)} — 30분 캐시
         self._tl_cache = {}       # {coin: (timestamp, tl_dict)} — 30분 캐시
@@ -648,7 +652,7 @@ class TradingBotV3:
         cmd = parts[0].lower().split("@")[0]  # /sell@botname → /sell
 
         if cmd == "/start":
-            self._tg_send("🤖 업비트 자동거래봇 v3.0\n\n"
+            self._tg_send("🤖 업비트 자동거래봇 v3.2\n\n"
                           "명령어:\n"
                           "/status - 현재 포지션\n"
                           "/report - 종합 리포트\n"
@@ -656,7 +660,8 @@ class TradingBotV3:
                           "/sellall - 전체 매도\n"
                           "/pause - 매매 일시중지\n"
                           "/resume - 매매 재개\n"
-                          "/autotune - 자동학습 제어")
+                          "/autotune - 자동학습 제어\n"
+                          "/mode - 모드 확인/전환 (demo/real)")
         elif cmd == "/status":
             self._cmd_status()
         elif cmd == "/report":
@@ -674,8 +679,48 @@ class TradingBotV3:
             self._tg_send("▶️ 매매 재개됨")
         elif cmd == "/autotune":
             self._cmd_autotune(parts[1].lower() if len(parts) > 1 else "status")
+        elif cmd == "/mode":
+            self._cmd_mode_switch(parts[1].lower() if len(parts) > 1 else "status")
         else:
             self._tg_send(f"❓ 알 수 없는 명령어: {cmd}\n/start 로 명령어 목록 확인")
+
+    def _cmd_mode_switch(self, target_mode):
+        """모드 전환 명령어 (/mode demo, /mode real, /mode status)"""
+        mode_conf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mode.conf")
+        if target_mode == "status":
+            self._tg_send(f"📋 현재 모드: {self.mode.upper()}")
+            return
+        if target_mode not in ("demo", "real"):
+            self._tg_send(f"❓ 사용법: /mode demo 또는 /mode real")
+            return
+        if target_mode == self.mode:
+            self._tg_send(f"ℹ️ 이미 {self.mode.upper()} 모드입니다.")
+            return
+
+        # real 전환 시 보안 잠금 확인
+        if target_mode == "real":
+            unlock_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".mode_unlock")
+            if not os.path.exists(unlock_file):
+                self._tg_send("🔒 real 모드 전환 불가: 잠금 파일이 없습니다.\n"
+                              "echo 'REAL_UNLOCK' > ~/Desktop/업비트자동/.mode_unlock 실행 후 재시도")
+                return
+            with open(unlock_file, "r") as f:
+                if f.read().strip() != "REAL_UNLOCK":
+                    self._tg_send("🔒 real 모드 전환 불가: 잠금 파일이 올바르지 않습니다.")
+                    return
+            os.remove(unlock_file)
+
+        # mode.conf 저장
+        with open(mode_conf, "w") as f:
+            f.write(target_mode)
+        self._notify(f"🔄 모드 전환: {self.mode.upper()} → {target_mode.upper()}\n봇을 재시작합니다...")
+
+        # 포지션 저장 후 재시작
+        self.save_log()
+        self._save_positions()
+        # os.execv로 프로세스 교체 (watchdog 불필요)
+        python = sys.executable
+        os.execv(python, [python, '-u', os.path.abspath(__file__), target_mode, '--auto'])
 
     def _cmd_autotune(self, subcmd):
         """텔레그램 /autotune 명령어 처리"""
@@ -2537,143 +2582,328 @@ class TradingBotV3:
             print(f"⚠️ [AutoTune] 오류: {e}")
 
     def _autotune_pattern_improve(self):
-        """v5.6: 패배 패턴 분석 → 시뮬레이션 → 승률 개선 시에만 적용"""
+        """v5.28: 백테스트 기반 자가 개선 엔진
+        원칙: 모든 파라미터 변경은 과거 데이터에서 P&L이 개선되는 방향일 때만 적용
+        """
         try:
-            from datetime import timedelta
-            now = datetime.now()
-            window = (now - timedelta(hours=24)).isoformat()
-
-            with self._db_lock:
-                cursor = self.db.execute(
-                    """SELECT t2.timestamp, t2.coin, t2.profit, t2.profit_rate, t2.batch, t2.momentum,
-                              t1.timestamp as buy_ts
-                       FROM trades t2
-                       JOIN trades t1 ON t1.coin = t2.coin AND t1.batch = t2.batch
-                            AND t1.action='buy' AND t1.id < t2.id
-                       WHERE t2.action='sell' AND t2.timestamp >= ?
-                       ORDER BY t2.id""",
-                    (window,)
-                )
-                sells = cursor.fetchall()
-
-            if len(sells) < 10:
-                return
-
-            # 거래 파싱
-            trades = []
-            for r in sells:
-                try:
-                    hold = (datetime.fromisoformat(r[0]) - datetime.fromisoformat(r[6])).total_seconds() / 60
-                    hour = int(r[0][11:13])
-                except:
-                    hold, hour = 0, 12
-                trades.append({
-                    'profit': r[2] or 0, 'pr': r[3] or 0, 'batch': r[4],
-                    'mom': r[5] or 0, 'hold': hold, 'hour': hour, 'coin': r[1]
-                })
-
-            total = len(trades)
-            wins = sum(1 for t in trades if t['profit'] > 0)
-            current_wr = wins / total * 100
-            current_pnl = sum(t['profit'] for t in trades)
-
-            # === 패턴 후보 탐색 ===
-            candidates = []
-
-            # 패턴1: surge 가짜급등 (5분내 -1%+)
-            p1 = [t for t in trades if t['batch'] == 'surge_trade' and t['hold'] <= 5 and t['pr'] <= -1.0]
-            p1_wins = [t for t in trades if t['batch'] == 'surge_trade' and t['hold'] <= 5 and t['pr'] > 0]
-            if len(p1) >= 2 and len(p1_wins) == 0:
-                saved = sum(abs(t['profit']) for t in p1)
-                candidates.append(('surge_quick_loss', len(p1), saved, 'surge 5분내 -1%+ 차단'))
-
-            # 패턴2: 특정 시간대 전패
-            for h_start, h_end, label in [(6, 9, 'dawn'), (23, 24, 'late_night'), (0, 5, 'midnight')]:
-                period = [t for t in trades if h_start <= t['hour'] < h_end]
-                period_wins = [t for t in period if t['profit'] > 0]
-                period_losses = [t for t in period if t['profit'] < 0]
-                if len(period) >= 3 and len(period_wins) == 0 and len(period_losses) >= 2:
-                    saved = sum(abs(t['profit']) for t in period_losses)
-                    candidates.append((f'time_block_{label}', len(period_losses), saved, f'{h_start}~{h_end}시 전패'))
-
-            # 패턴3: 특정 코인 연패 (3회+)
-            coin_trades = {}
-            for t in trades:
-                coin_trades.setdefault(t['coin'], []).append(t)
-            for coin, cts in coin_trades.items():
-                losses = [t for t in cts if t['profit'] < 0]
-                wins_c = [t for t in cts if t['profit'] > 0]
-                if len(losses) >= 3 and len(wins_c) == 0:
-                    saved = sum(abs(t['profit']) for t in losses)
-                    candidates.append((f'coin_ban_{coin}', len(losses), saved, f'{coin} {len(losses)}연패'))
-
-            # 패턴4: 보유시간별 패턴 (특정 구간 승률 0%)
-            for hold_min, hold_max, label in [(0, 3, 'ultra_quick'), (30, 60, 'mid_hold')]:
-                band = [t for t in trades if hold_min <= t['hold'] < hold_max]
-                band_wins = [t for t in band if t['profit'] > 0]
-                band_losses = [t for t in band if t['profit'] < 0]
-                if len(band) >= 3 and len(band_wins) == 0 and len(band_losses) >= 2:
-                    saved = sum(abs(t['profit']) for t in band_losses)
-                    candidates.append((f'hold_{label}', len(band_losses), saved, f'{hold_min}~{hold_max}분 보유 전패'))
-
-            if not candidates:
-                print(f"🤖 [AutoTune] 패턴 분석: 개선 후보 없음 (현재 승률 {current_wr:.1f}%)")
-                return
-
-            # === 시뮬레이션: 후보 적용 시 승률 계산 ===
-            best = None
-            for name, blocked_count, saved_pnl, desc in candidates:
-                # 패배만 차단, 승리는 유지 → 승률 계산
-                new_total = total - blocked_count
-                new_wins = wins  # 승리는 그대로
-                if new_total > 0:
-                    new_wr = new_wins / new_total * 100
-                    improvement = new_wr - current_wr
-                    if improvement > 0 and (best is None or improvement > best['improvement']):
-                        best = {
-                            'name': name, 'desc': desc,
-                            'blocked': blocked_count, 'saved': saved_pnl,
-                            'new_wr': new_wr, 'improvement': improvement
-                        }
-
-            if not best:
-                print(f"🤖 [AutoTune] 패턴 분석: 승률 개선 후보 없음")
-                return
-
-            # === 승률 개선 확인 → 적용 ===
-            print(f"🤖 [AutoTune] 패턴 발견: {best['desc']}")
-            print(f"   차단 {best['blocked']}건 | 절약 +{best['saved']:,.0f}원 | 승률 {current_wr:.1f}% → {best['new_wr']:.1f}% (+{best['improvement']:.1f}%p)")
-
-            # 규칙 적용
-            rule_name = best['name']
-            if rule_name == 'surge_quick_loss':
-                # surge 최소 보유시간을 5분으로 확장 (현재 3분)
-                # → _surge_min_hold 변수로 관리
-                if not hasattr(self, '_surge_min_hold') or self._surge_min_hold < 5:
-                    self._surge_min_hold = 5
-                    print(f"   ✅ 적용: surge 최소 보유 3분 → 5분")
-            elif rule_name.startswith('time_block_'):
-                # 해당 시간대 모멘텀 기준 강화
-                if not hasattr(self, '_autotune_time_boost'):
-                    self._autotune_time_boost = {}
-                period = rule_name.replace('time_block_', '')
-                self._autotune_time_boost[period] = 10  # +10점 부스트
-                print(f"   ✅ 적용: {best['desc']} → min_score +10점")
-            elif rule_name.startswith('coin_ban_'):
-                coin = rule_name.replace('coin_ban_', '')
-                if coin not in self._autotune_blacklist:
-                    self._autotune_blacklist.add(coin)
-                    print(f"   ✅ 적용: {coin} 블랙리스트 추가")
-            elif rule_name.startswith('hold_'):
-                # 보유시간 관련 → 최소 보유시간 확대
-                if not hasattr(self, '_min_hold_normal'):
-                    self._min_hold_normal = 5
-                print(f"   ✅ 적용: 일반 매매 최소 보유 5분")
-
-            self._notify(f"[AutoTune] 패턴 개선: {best['desc']} | 승률 {current_wr:.1f}→{best['new_wr']:.1f}% (+{best['improvement']:.1f}%p) | 절약 +{best['saved']:,.0f}원")
-
+            self._backtest_and_improve()
         except Exception as e:
-            print(f"⚠️ [AutoTune] 패턴 분석 오류: {e}")
+            print(f"⚠️ [AutoTune] 백테스트 오류: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _backtest_load_trades(self, days=7):
+        """백테스트용 거래 데이터 로드 (buy/sell 페어 매칭)"""
+        from datetime import timedelta
+        window = (datetime.now() - timedelta(days=days)).isoformat()
+        with self._db_lock:
+            cursor = self.db.execute(
+                """SELECT t2.id, t2.timestamp, t2.coin, t2.profit, t2.profit_rate,
+                          t2.batch, t2.momentum, t2.amount,
+                          t1.timestamp as buy_ts, t1.price as buy_price, t2.price as sell_price
+                   FROM trades t2
+                   JOIN trades t1 ON t1.coin = t2.coin AND t1.batch = t2.batch
+                        AND t1.action='buy' AND t1.id < t2.id
+                        AND t1.id = (SELECT MAX(id) FROM trades
+                                     WHERE coin = t2.coin AND batch = t2.batch
+                                     AND action='buy' AND id < t2.id)
+                   WHERE t2.action='sell' AND t2.batch NOT LIKE '%surge%'
+                         AND t2.batch NOT LIKE '%idle%' AND t2.timestamp >= ?
+                   ORDER BY t2.id""",
+                (window,)
+            )
+            rows = cursor.fetchall()
+
+        trades = []
+        for r in rows:
+            try:
+                hold = (datetime.fromisoformat(r[1]) - datetime.fromisoformat(r[8])).total_seconds() / 60
+                hour = int(r[1][11:13])
+            except:
+                hold, hour = 0, 12
+            trades.append({
+                'id': r[0], 'coin': r[2], 'profit': r[3] or 0,
+                'pr': r[4] or 0, 'batch': r[5], 'mom': r[6] or 0,
+                'amount': r[7] or 0, 'hold': hold, 'hour': hour,
+                'buy_price': r[9] or 0, 'sell_price': r[10] or 0,
+            })
+        return trades
+
+    def _backtest_simulate(self, trades, params):
+        """파라미터 세트로 과거 거래를 시뮬레이션하여 예상 P&L 계산
+
+        원칙: 실제 P&L을 기준으로, 파라미터 변경으로 인한 차이만 반영
+        - 진입 필터(코인/시간/재진입): 해당 거래 제거 → 실제 profit 제외
+        - 손절 변경: actual보다 타이트하면 손실 축소, 느슨하면 실제값 유지
+        - 타임아웃 변경: 조기 탈출 시 손실 비례 축소 추정
+        """
+        sim_pnl = 0
+        sim_wins = 0
+        sim_losses = 0
+        sim_trades = 0
+
+        # 코인별 손실 추적 (첫 패 후 재진입 차단용)
+        coin_loss_count = {}
+
+        for t in trades:
+            # 1. 진입 필터 — 차단된 거래는 아예 제외
+            if t['coin'] in params.get('block_coins', set()):
+                continue
+            if t['hour'] in params.get('block_hours', set()):
+                continue
+
+            # 재진입 제한: 해당 코인에서 N패 이후 추가 진입 차단
+            max_re = params.get('max_reentry', 99)
+            losses_so_far = coin_loss_count.get(t['coin'], 0)
+            if losses_so_far >= max_re:
+                continue  # 이미 N번 패배 → 재진입 차단
+
+            sim_trades += 1
+
+            # 2. 실제 profit 기반 시뮬레이션 (실제 P&L을 기준선으로 사용)
+            sim_profit = t['profit']  # 기본: 실제 profit 그대로
+            actual_pr = t['pr'] / 100  # % → ratio
+
+            # 손절 시뮬: 실제보다 타이트한 손절이면 손실 축소
+            mom = t['mom']
+            if mom < 20:
+                stop = params.get('stop_loss_low', -0.01)
+            elif mom < 40:
+                stop = params.get('stop_loss_mid', -0.015)
+            else:
+                stop = params.get('stop_loss_high', -0.02)
+
+            if actual_pr < stop and actual_pr < 0:
+                # 실제 손실이 새 손절선보다 크면 → 새 손절선에서 컷했을 것
+                # 손실 비율 차이만큼 실제 profit 조정
+                amount = t['amount'] if t['amount'] > 0 else 1000000
+                sim_profit = stop * amount  # 새 손절선 적용
+
+            # 타임아웃 시뮬: 더 빨리 나왔으면 손실 축소 (비례 추정)
+            timeout = params.get('timeout_min', 20)
+            if t['hold'] > timeout and actual_pr < 0.003 and actual_pr < 0:
+                time_ratio = min(1.0, timeout / max(t['hold'], 1))
+                adjusted = t['profit'] * time_ratio
+                sim_profit = max(sim_profit, adjusted)  # 더 나은 쪽 선택
+
+            sim_pnl += sim_profit
+            if sim_profit > 0:
+                sim_wins += 1
+            elif sim_profit < 0:
+                sim_losses += 1
+                coin_loss_count[t['coin']] = coin_loss_count.get(t['coin'], 0) + 1
+
+        sim_wr = sim_wins / (sim_wins + sim_losses) * 100 if (sim_wins + sim_losses) > 0 else 0
+        return {
+            'pnl': sim_pnl, 'trades': sim_trades,
+            'wins': sim_wins, 'losses': sim_losses, 'win_rate': sim_wr
+        }
+
+    def _backtest_and_improve(self):
+        """백테스트 기반 파라미터 자동 최적화"""
+        trades = self._backtest_load_trades(days=14)
+        if len(trades) < 20:
+            print(f"🧪 [백테스트] 거래 {len(trades)}건 — 최소 15건 필요, 스킵")
+            return
+
+        # 현재 P&L (기준선)
+        current_pnl = sum(t['profit'] for t in trades)
+        current_wins = sum(1 for t in trades if t['profit'] > 0)
+        current_losses = sum(1 for t in trades if t['profit'] < 0)
+        current_wr = current_wins / (current_wins + current_losses) * 100 if (current_wins + current_losses) else 0
+        print(f"\n🧪 [백테스트] {len(trades)}건 분석 | 현재 P&L: {current_pnl:+,.0f}원 | 승률: {current_wr:.1f}%")
+
+        # === 파라미터 후보 생성 ===
+        # 코인 블랙리스트 후보: 3건+ 거래에서 총 손실인 코인
+        coin_stats = {}
+        for t in trades:
+            coin_stats.setdefault(t['coin'], []).append(t['profit'])
+        block_coin_candidates = set()
+        for coin, profits in coin_stats.items():
+            # 과적합 방지: 5건+ & 승률 25%미만 & 누적손실 2만원+
+            if (len(profits) >= 5 and sum(profits) < -20000
+                    and sum(1 for p in profits if p > 0) / len(profits) < 0.25):
+                block_coin_candidates.add(coin)
+
+        # v5.28: AI 반성 교훈에서 반복 실패 코인도 차단 후보 추가
+        # severity 2+ (timing/overchase/early_exit) & 같은 코인 3건+
+        try:
+            with self._db_lock:
+                _ref = self.db.execute(
+                    "SELECT coin, COUNT(*) as cnt FROM trade_reflections "
+                    "WHERE severity >= 2 AND mistake_type != 'none' "
+                    "AND created_at >= datetime('now', '-14 days') "
+                    "GROUP BY coin HAVING cnt >= 3"
+                ).fetchall()
+                for coin, cnt in _ref:
+                    if coin not in block_coin_candidates:
+                        block_coin_candidates.add(coin)
+                        print(f"🧪 [백테스트] AI 교훈: {coin} 고심각도 {cnt}건 → 차단 후보 추가")
+        except:
+            pass
+
+        # 시간대 차단 후보: 5건+ & 승률 15% 미만 (과적합 방지 — 엄격 기준)
+        hour_stats = {}
+        for t in trades:
+            hour_stats.setdefault(t['hour'], []).append(t['profit'])
+        block_hour_candidates = set()
+        for hour, profits in hour_stats.items():
+            if len(profits) >= 5:
+                wr = sum(1 for p in profits if p > 0) / len(profits)
+                total_loss = sum(p for p in profits if p < 0)
+                if wr < 0.15 and total_loss < -30000:  # 승률 15%미만 + 누적손실 3만+
+                    block_hour_candidates.add(hour)
+
+        # 파라미터 조합 생성
+        proposals = []
+
+        # 기본 현재 설정
+        base_params = {
+            'stop_loss_low': -0.01, 'stop_loss_mid': -0.015, 'stop_loss_high': -0.02,
+            'timeout_min': 20, 'trailing_start': 0.008,
+            'block_coins': set(), 'block_hours': set(), 'max_reentry': 99,
+        }
+
+        # 1. 손절 변형
+        for sl_low in [-0.008, -0.01, -0.012]:
+            for sl_mid in [-0.012, -0.015, -0.018]:
+                for sl_high in [-0.015, -0.02, -0.025]:
+                    if sl_low > sl_mid or sl_mid > sl_high:
+                        continue  # 논리적 순서 유지
+                    p = dict(base_params)
+                    p['stop_loss_low'] = sl_low
+                    p['stop_loss_mid'] = sl_mid
+                    p['stop_loss_high'] = sl_high
+                    proposals.append(('손절', f'{sl_low*100:.1f}/{sl_mid*100:.1f}/{sl_high*100:.1f}%', p))
+
+        # 2. 타임아웃 변형
+        for timeout in [15, 18, 20, 25]:
+            p = dict(base_params)
+            p['timeout_min'] = timeout
+            proposals.append(('타임아웃', f'{timeout}분', p))
+
+        # 3. 코인 블랙리스트
+        if block_coin_candidates:
+            p = dict(base_params)
+            p['block_coins'] = block_coin_candidates
+            proposals.append(('코인차단', f'{",".join(sorted(block_coin_candidates)[:5])}', p))
+
+        # 4. 시간대 차단
+        if block_hour_candidates:
+            p = dict(base_params)
+            p['block_hours'] = block_hour_candidates
+            proposals.append(('시간차단', f'{sorted(block_hour_candidates)}시', p))
+
+        # 5. 첫 패 재진입 제한
+        p = dict(base_params)
+        p['max_reentry'] = 1
+        proposals.append(('재진입1회', '코인당 1회', p))
+
+        # 6. 복합 최적안 (손절 타이트 + 코인차단 + 재진입제한)
+        p = dict(base_params)
+        p['block_coins'] = block_coin_candidates
+        p['max_reentry'] = 1
+        for sl_low in [-0.008, -0.01]:
+            for sl_mid in [-0.012, -0.015]:
+                p2 = dict(p)
+                p2['stop_loss_low'] = sl_low
+                p2['stop_loss_mid'] = sl_mid
+                proposals.append(('복합', f'SL{sl_low*100:.1f}/{sl_mid*100:.1f}+차단+재진입1', p2))
+
+        # === 시뮬레이션 실행 ===
+        best_result = None
+        best_label = None
+        best_params = None
+
+        for category, label, params in proposals:
+            result = self._backtest_simulate(trades, params)
+            pnl_improve = result['pnl'] - current_pnl  # 실제 P&L 대비 개선
+
+            # P&L이 개선되고 거래수가 너무 적지 않은 것만 선택
+            min_trades = len(trades) * 0.4  # 기존의 40% 이상 거래 유지
+            if pnl_improve > 0 and result['trades'] >= min_trades:
+                if best_result is None or result['pnl'] > best_result['pnl']:
+                    best_result = result
+                    best_label = f"{category}({label})"
+                    best_params = params
+
+        if not best_result:
+            print(f"🧪 [백테스트] 현재 설정이 최적 — 변경 없음")
+            return
+
+        pnl_improve = best_result['pnl'] - current_pnl
+        wr_improve = best_result['win_rate'] - current_wr
+
+        # 최소 개선 기준: P&L 5% 이상 또는 절대 5만원 이상
+        min_improve = max(abs(current_pnl) * 0.05, 50000)
+        if pnl_improve < min_improve:
+            print(f"🧪 [백테스트] 최적안 {best_label}: +{pnl_improve:,.0f}원 (기준 {min_improve:,.0f}원 미달) → 유보")
+            return
+
+        print(f"🧪 [백테스트] ✅ 최적안 발견: {best_label}")
+        print(f"   P&L: {current_pnl:+,.0f}원 → {best_result['pnl']:+,.0f}원 (+{pnl_improve:,.0f}원)")
+        print(f"   승률: {current_wr:.1f}% → {best_result['win_rate']:.1f}% ({wr_improve:+.1f}%p)")
+        print(f"   거래: {len(trades)}건 → {best_result['trades']}건")
+
+        # === 적용 ===
+        applied = []
+
+        # 코인 블랙리스트 적용
+        if best_params.get('block_coins'):
+            for coin in best_params['block_coins']:
+                if coin not in self._autotune_blacklist and len(self._autotune_blacklist) < 10:
+                    self._autotune_blacklist.add(coin)
+                    # DB에도 저장 (7일 만료)
+                    _td = __import__('datetime').timedelta
+                    expires = (datetime.now() + _td(days=7)).isoformat()
+                    try:
+                        with self._db_lock:
+                            self.db.execute(
+                                "INSERT OR REPLACE INTO auto_tune_rules (rule_type, coin, param_key, param_value, reason, created_at, expires_at, active) VALUES (?,?,?,?,?,?,?,1)",
+                                ('coin_blacklist', coin, 'blacklist', 1,
+                                 f'백테스트: {coin} 승률 30% 미만',
+                                 datetime.now().isoformat(), expires)
+                            )
+                            self.db.commit()
+                    except:
+                        pass
+                    applied.append(f'{coin} 블랙리스트')
+
+        # 시간대 차단 적용
+        if best_params.get('block_hours'):
+            if not hasattr(self, '_autotune_time_boost'):
+                self._autotune_time_boost = {}
+            for hour in best_params['block_hours']:
+                if 6 <= hour < 9:
+                    self._autotune_time_boost['dawn'] = 15
+                elif hour >= 23 or hour < 5:
+                    self._autotune_time_boost['late_night'] = 15
+                applied.append(f'{hour}시 기준 강화')
+
+        # 손절 라인 적용 (런타임 변수로)
+        new_sl_low = best_params.get('stop_loss_low', -0.01)
+        new_sl_mid = best_params.get('stop_loss_mid', -0.015)
+        new_sl_high = best_params.get('stop_loss_high', -0.02)
+        self._bt_stop_loss = {
+            'low': new_sl_low, 'mid': new_sl_mid, 'high': new_sl_high
+        }
+        applied.append(f'손절 {new_sl_low*100:.1f}/{new_sl_mid*100:.1f}/{new_sl_high*100:.1f}%')
+
+        # 타임아웃 적용
+        new_timeout = best_params.get('timeout_min', 20)
+        self._bt_timeout_min = new_timeout
+        applied.append(f'타임아웃 {new_timeout}분')
+
+        # 재진입 제한 적용
+        max_re = best_params.get('max_reentry', 99)
+        if max_re <= 2:
+            self._bt_max_reentry = max_re
+            applied.append(f'재진입 {max_re}회')
+
+        if applied:
+            msg = f"[백테스트] 자가개선 적용: {', '.join(applied)} | P&L +{pnl_improve:,.0f}원 | 승률 {wr_improve:+.1f}%p"
+            print(f"🧪 {msg}")
+            self._notify(msg)
 
     def calculate_momentum(self, coin):
         """종합 모멘텀 점수 (0~100점) - 5분 캐시 + 15초 타임아웃 + v5.2 EMA 평활화"""
@@ -2746,10 +2976,21 @@ class TradingBotV3:
                 break
 
         sorted_coins = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+        # v6.0: 스캔 결과 저장 (상대적 기준 산출용)
+        self._last_scan_scores = dict(scores)
+
         # 상위 10개 출력
         print("\n📊 모멘텀 TOP 10:")
         for rank, (coin, score) in enumerate(sorted_coins[:10], 1):
             print(f"  {rank}. {coin}: {score}점")
+        # 시장 분포 요약
+        all_vals = sorted(scores.values(), reverse=True)
+        if all_vals:
+            p10 = all_vals[max(0, int(len(all_vals)*0.10)-1)]
+            p20 = all_vals[max(0, int(len(all_vals)*0.20)-1)]
+            p50 = all_vals[max(0, int(len(all_vals)*0.50)-1)]
+            print(f"📉 분포: TOP10%={p10:.1f} | TOP20%={p20:.1f} | 중위={p50:.1f} (총 {len(all_vals)}개)")
         print()
 
         # 점수가 (0 + 부스트)보다 큰 코인만 반환 (최대 10개)
@@ -2801,7 +3042,7 @@ class TradingBotV3:
     # 3. 자동 매수/매도
     # ============================================
     
-    MAX_POSITIONS = 2  # 기본 슬롯 (AI 토론 통과 시 동적 확대)
+    MAX_POSITIONS = 3  # v5.28: 2→3슬롯 (거래 빈도+분산, 20분 타임아웃으로 회전 빠름)
     MAX_POSITIONS_BOOST = 4  # v5.22: AI 확신 시 최대 4슬롯
 
     # 코인 섹터 분류 (동일 섹터 집중 방지)
@@ -2887,7 +3128,8 @@ class TradingBotV3:
                 self._daily_reset_date = today
 
             # v5.24: 당일 1패 코인 재진입 금지 (CFG -306k, ANKR -120k 반복진입 방지)
-            if self._daily_coin_losses.get(coin, 0) >= 1:
+            _bt_max_re = getattr(self, '_bt_max_reentry', 1)
+            if self._daily_coin_losses.get(coin, 0) >= _bt_max_re:
                 print(f"🚫 {coin} 매수 차단: 오늘 이미 {self._daily_coin_losses[coin]}패 (1패 시 당일 차단)")
                 return False
 
@@ -3191,26 +3433,34 @@ class TradingBotV3:
                     del self._pending_2nd_buy[coin]
 
         # 시장 강도 확인
-        market_strength, min_score = self.check_market_strength()
+        market_strength, _base_score = self.check_market_strength()
         self.last_market_state = market_strength
 
         # 미국 시장 연동
         us_state, us_adjust = self.check_us_market()
-        min_score = max(0, min(100, min_score + us_adjust))
-        # v5.30: batch가 수익 엔진 — 기준 되돌림
-        # 데이터: batch 381건 +47만(이전) vs 0건(현재) → batch가 꺼지면 surge 손실만 남음
-        # 이전 평균 진입 모멘텀 23~34점, 승률 51%로 수익
-        # 검증된 개선(1패 차단/수수료 방지/30분 타임아웃)은 유지
-        if market_strength == "강세":
-            min_score = min(min_score, 22)   # 강세: 적극 (이전 수준)
-        elif market_strength == "보통":
-            min_score = min(min_score, 25)   # 보통: 이전과 유사
-        elif market_strength in ("약세", "심약세"):
-            min_score = min(min_score, 30)   # 약세: 약간 방어
-        else:
-            min_score = min(min_score, 35)   # 극약세: 방어적
 
-        print(f"📈 시장 상태: {market_strength} | 미국: {us_state} → 최소 신호: {min_score}점")
+        # v6.0: 상대적 모멘텀 기준 (백분위 방식)
+        # 시장 전체가 죽어있으면 절대 기준(22점)은 의미 없음
+        # → 현재 스캔 분포의 상위 N%를 기준으로 진입 여부 결정
+        ABSOLUTE_FLOOR = 12  # 데이터 기반: 12점 미만은 승률 28% + 건당 손실
+        all_scores = sorted(self._last_scan_scores.values(), reverse=True) if self._last_scan_scores else []
+
+        if all_scores and len(all_scores) >= 10:
+            # 시장 상태별 백분위 (상위 몇 %까지 허용)
+            pct_map = {"강세": 0.25, "보통": 0.15, "약세": 0.10, "심약세": 0.08, "극약세": 0.05}
+            pct = pct_map.get(market_strength, 0.15)
+            idx = max(0, int(len(all_scores) * pct) - 1)
+            percentile_score = all_scores[idx]
+            min_score = max(ABSOLUTE_FLOOR, percentile_score)
+            # 미국 시장 약세면 소폭 상향
+            min_score = max(ABSOLUTE_FLOOR, min_score + max(0, us_adjust))
+            self._last_percentile_threshold = round(min_score, 1)
+            print(f"📈 시장: {market_strength} | 미국: {us_state} | 기준: TOP{int(pct*100)}% = {min_score:.1f}점 (하한 {ABSOLUTE_FLOOR}점)")
+        else:
+            # 스캔 데이터 없으면 기존 방식 fallback
+            min_score = max(ABSOLUTE_FLOOR, _base_score + max(0, us_adjust))
+            self._last_percentile_threshold = round(min_score, 1)
+            print(f"📈 시장 상태: {market_strength} | 미국: {us_state} → 최소 신호: {min_score}점 (fallback)")
 
         # 극약세: 개별 강세 코인만 허용 (v3.3: 완전 중단 → 선별 진입)
         if market_strength == "극약세":
@@ -3268,11 +3518,11 @@ class TradingBotV3:
             if remaining_slots <= 0:
                 break
 
-            # 신규 진입 쿨타임 10분 (과매매 방지)
+            # v5.28: 신규 진입 쿨타임 5분 (10분→5분, 거래 빈도 회복)
             _last_entry = getattr(self, '_last_new_entry_time', 0)
-            if time.time() - _last_entry < 600:
-                _remaining_cool = int((600 - (time.time() - _last_entry)) / 60)
-                print(f"⏳ 신규 진입 쿨타임 10분 미경과 (잔여 {_remaining_cool}분) → 패스")
+            if time.time() - _last_entry < 300:
+                _remaining_cool = int((300 - (time.time() - _last_entry)) / 60)
+                print(f"⏳ 신규 진입 쿨타임 5분 미경과 (잔여 {_remaining_cool}분) → 패스")
                 break
 
             # 이미 보유 중인 코인 스킵
@@ -3570,25 +3820,54 @@ class TradingBotV3:
                 except:
                     pass
 
-                # v5.16: 직전 5분 가격변동 확인 (0% 매도 근절 — 움직이지 않는 코인 차단)
+                # v5.28: 직전 5분 가격변동 확인 (정체 + 하락추세 차단)
+                # 데이터: 5분내 급락 49건 -84만원 = 진입 직후 하락 = 진입 타이밍 문제
                 try:
                     _recent = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute1", count=5)
                     if _recent is not None and len(_recent) >= 5:
                         _5m_chg = (_recent['close'].iloc[-1] - _recent['close'].iloc[0]) / _recent['close'].iloc[0]
                         _bullish = sum(1 for _, r in _recent.iterrows() if r['close'] > r['open'])
+                        # 정체 필터
                         if abs(_5m_chg) < 0.001 and _bullish < 3:
                             print(f" ⚠️ {coin} 직전 5분 정체 ({_5m_chg*100:+.2f}%, 양봉{_bullish}/5) → 패스")
+                            continue
+                        # v5.28: 하락 추세 필터 (최근 3분 연속 음봉이면 진입 금지)
+                        _last3 = _recent.tail(3)
+                        _bearish3 = sum(1 for _, r in _last3.iterrows() if r['close'] < r['open'])
+                        if _bearish3 >= 3 and _5m_chg < -0.003:
+                            print(f" ⚠️ {coin} 직전 3분 연속 음봉 + 하락({_5m_chg*100:+.2f}%) → 패스")
+                            continue
+                        # v5.28: 직전 1분 급락 필터 (-0.5% 이상 하락)
+                        _1m_chg = (_recent['close'].iloc[-1] - _recent['close'].iloc[-2]) / _recent['close'].iloc[-2]
+                        if _1m_chg < -0.005:
+                            print(f" ⚠️ {coin} 직전 1분 급락 ({_1m_chg*100:+.2f}%) → 패스")
                             continue
                 except:
                     pass
 
-                # v5.20: AI 매수 전 검증 (Bull/Bear 토론 + 과거 교훈)
+                # v5.28: AI 매수 전 검증 (Bull/Bear 토론 + 과거 교훈 + 백테스트 전적)
                 if hasattr(self, 'ai_agents') and self.ai_agents and self.ai_agents.enabled:
+                    # 백테스트 전적 데이터 수집
+                    _coin_record = ""
+                    try:
+                        with self._db_lock:
+                            _cr = self.db.execute(
+                                "SELECT COUNT(*), SUM(CASE WHEN profit > 0 THEN 1 ELSE 0 END), "
+                                "COALESCE(SUM(profit), 0) FROM trades "
+                                "WHERE coin=? AND action='sell' AND timestamp >= datetime('now', '-14 days')",
+                                (coin,)
+                            ).fetchone()
+                            if _cr and _cr[0] >= 2:
+                                _coin_record = f"\n최근14일 전적: {_cr[0]}건 {_cr[1]}승 {_cr[0]-_cr[1]}패, 손익 {_cr[2]:+,.0f}원"
+                    except:
+                        pass
+
                     _ai_indicators = {
                         'rsi': self.analyze_rsi(coin),
                         'volume_score': self.analyze_volume(coin),
                         'momentum': momentum,
-                        'market_state': market_strength
+                        'market_state': market_strength,
+                        'coin_record': _coin_record,  # 백테스트 전적 추가
                     }
                     _ai_result = self.ai_agents.pre_buy_check(coin, _ai_indicators)
                     if not _ai_result['approved']:
@@ -4108,7 +4387,8 @@ class TradingBotV3:
                 if hasattr(self, '_warning_coins') and coin in self._warning_coins:
                     continue
                 # v5.24: 당일 1패 코인 차단
-                if self._daily_coin_losses.get(coin, 0) >= 1:
+                _bt_max_re = getattr(self, '_bt_max_reentry', 1)
+                if self._daily_coin_losses.get(coin, 0) >= _bt_max_re:
                     continue
                 chg = t.get('signed_change_rate', 0)
                 trade_price = t.get('acc_trade_price_24h', 0)
@@ -4315,7 +4595,8 @@ class TradingBotV3:
                         pass
 
                     # 당일 1패 코인 차단
-                    if self._daily_coin_losses.get(coin, 0) >= 1:
+                    _bt_max_re = getattr(self, '_bt_max_reentry', 1)
+                    if self._daily_coin_losses.get(coin, 0) >= _bt_max_re:
                         print(f"🚀 [SURGE 차단] {coin} 오늘 이미 패배 → 재진입 금지")
                         del self._surge_watchlist[coin]
                         continue
@@ -4831,13 +5112,13 @@ class TradingBotV3:
                 if not hasattr(self, '_trailing_peaks'):
                     self._trailing_peaks = {}
 
-                # 모멘텀별 트레일링 시작점 & trail drop 조정
+                # v5.28: 트레일링 시작점 낮춤 (수익 보호 우선, 데이터: 15분내 익절이 수익 전부)
                 if momentum >= 70:
-                    TRAILING_START = 0.020   # 고모멘텀: +2%부터 추적 (더 먹고 나오기)
+                    TRAILING_START = 0.015   # 고모멘텀: +1.5%부터 (기존 2%)
                 elif momentum >= 50:
-                    TRAILING_START = 0.015   # 중모멘텀: +1.5%부터
+                    TRAILING_START = 0.010   # 중모멘텀: +1.0%부터 (기존 1.5%)
                 else:
-                    TRAILING_START = 0.012   # 저모멘텀: +1.2% (기존)
+                    TRAILING_START = 0.008   # 저모멘텀: +0.8% (기존 1.2%)
 
                 if profit_rate >= TRAILING_START:
                     current_peak = self._trailing_peaks.get(trailing_key, 0)
@@ -4915,13 +5196,14 @@ class TradingBotV3:
                 if sr_sl_triggered:
                     continue
 
-                # 3-2. fallback 고정 % 손절 (S/R이 먼저 잡으므로 여유)
+                # 3-2. v5.28: 손절 — 백테스트 최적값 우선, 없으면 기본값
+                _bt_sl = getattr(self, '_bt_stop_loss', None)
                 if momentum < 20:
-                    stop_loss = -0.015  # 붕괴 → -1.5%
+                    stop_loss = _bt_sl['low'] if _bt_sl else -0.01
                 elif momentum < 40:
-                    stop_loss = -0.02   # 저모멘텀 → -2%
+                    stop_loss = _bt_sl['mid'] if _bt_sl else -0.015
                 else:
-                    stop_loss = -0.03   # 기본 → -3%
+                    stop_loss = _bt_sl['high'] if _bt_sl else -0.02
 
                 # v4.4: AutoTune 손절 조정
                 for _atr in self._autotune_rules:
@@ -4981,35 +5263,26 @@ class TradingBotV3:
                     if hasattr(self, '_mini_trail_peaks') and mini_trail_key in self._mini_trail_peaks:
                         del self._mini_trail_peaks[mini_trail_key]
 
-                # === v5.14: 15분 횡보 조기 정리 (데이터: 15분+ 승률 급감, 5-15분이 최적) ===
-                if 0.25 <= hours < 0.5 and abs(profit_rate) < 0.003 and momentum < 35 and not uptrend:
+                # === v5.28: 15분 횡보 조기 정리 (데이터: 15분내 익절 +215만 vs 15분+ 손실 구간) ===
+                if minutes_held >= 15 and minutes_held < 20 and abs(profit_rate) < 0.003 and momentum < 30 and not uptrend:
                     print(f"⏰ {coin} {batch_id} 15분 횡보(±0.3% 미만) + 모멘텀{momentum:.0f}점↓ → 조기 정리")
                     self.place_sell_order(coin, batch_id)
                     self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False, 'early_exit': True, 'exit_price': price}
                     continue
 
-                # === v5.24: 30분 타임아웃 (데이터: 30-60분 -400k, 승률33%) ===
-                # 30분 넘었는데 수익 0.3% 미만이면 탈출 (거래량 좋으면 예외)
-                if hours >= 0.5 and profit_rate < 0.003:
-                    _vol_30m = 0
-                    try:
-                        _vol_30m = self.analyze_volume(coin)
-                    except:
-                        pass
-                    if _vol_30m >= 60 and momentum >= 40:
-                        print(f"  ⏰ {coin} {batch_id} 30분+ 횡보({profit_rate*100:+.2f}%) but 거래량{_vol_30m}+모멘텀{momentum:.0f} → 유지")
-                    else:
-                        print(f"⏰ {coin} {batch_id} 30분 타임아웃 ({profit_rate*100:+.2f}%, 모멘텀{momentum:.0f}, 거래량{_vol_30m}) → 정리")
-                        self.place_sell_order(coin, batch_id)
-                        self._sell_cooldown[coin] = {
-                            'time': time.time(), 'stoploss': profit_rate < 0,
-                            'early_exit': True, 'exit_price': price
-                        }
-                        continue
+                # === v5.28: 타임아웃 — 백테스트 최적값 우선 (기본 20분) ===
+                _bt_timeout = getattr(self, '_bt_timeout_min', 20)
+                if minutes_held >= _bt_timeout and profit_rate < 0.003:
+                    print(f"⏰ {coin} {batch_id} 20분 타임아웃 ({profit_rate*100:+.2f}%, {minutes_held:.0f}분, 모멘텀{momentum:.0f}) → 정리")
+                    self.place_sell_order(coin, batch_id)
+                    self._sell_cooldown[coin] = {
+                        'time': time.time(), 'stoploss': profit_rate < 0,
+                        'early_exit': True, 'exit_price': price
+                    }
+                    continue
 
-                # === 3.5 v5.6: 시간 기반 정리 완화 (30분→40분, -0.3%→-0.5%) ===
-                # 근소 손실은 더 기다림
-                if hours >= 0.67 and profit_rate < -0.005 and momentum < 35 and not uptrend:
+                # === 3.5 v5.28: 20분+ 손실 + 모멘텀 약 → 즉시 정리 ===
+                if minutes_held >= 20 and profit_rate < -0.003 and momentum < 30 and not uptrend:
                     print(f"⏰ {coin} {batch_id} 30분+ 손실({profit_rate*100:+.2f}%) + 모멘텀 {momentum:.0f}점 → 정리")
                     self.place_sell_order(coin, batch_id)
                     self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False}
@@ -5018,7 +5291,7 @@ class TradingBotV3:
                 # === 4. v5.6: 횡보 처리 — 모멘텀 점검 후 판단 ===
                 # 원칙: 성급하게 팔아 수수료만 날리지 말고, 모멘텀/거래량 보고 판단
                 # 단, 지속 횡보면 자금 묶이지 않게 정리
-                if hours >= 0.75 and abs(profit_rate) < 0.01 and not uptrend:
+                if minutes_held >= 25 and abs(profit_rate) < 0.01 and not uptrend:
                     _vol_ok = False
                     try:
                         _vol_score = self.analyze_volume(coin)
@@ -5029,8 +5302,8 @@ class TradingBotV3:
                     if _vol_ok or momentum >= 30:
                         # 거래량/모멘텀 살아있음 → 아직 기회 있으니 유지
                         print(f"  ⏳ {coin} {batch_id} 횡보 {hours:.1f}시간 | {'거래량↑' if _vol_ok else ''} 모멘텀{momentum:.0f}점 → 유지")
-                    elif hours >= 2.0:
-                        # 2시간+ 횡보 + 모멘텀/거래량 약 → 더 좋은 코인 있으면 스왑, 없으면 정리
+                    elif minutes_held >= 30:
+                        # v5.28: 30분+ 횡보 → 더 좋은 코인 있으면 스왑, 없으면 정리
                         better = self._find_better_coin(coin, momentum)
                         # v5.8: 포지션 슬롯 여유 있을 때만 스왑 (매도 후 매수 차단 방지)
                         # 교체 후 남은 슬롯 = 현재 포지션 수 - 1(매도 예정) + 0(아직 미진입) → 항상 가능
@@ -5045,8 +5318,8 @@ class TradingBotV3:
                                 if not bought:
                                     print(f"  ⚠️ {better[0]} 매수 실패 → 자금 유지, {coin} 쿨다운 해제")
                             continue
-                        elif hours >= 3.0:
-                            # 3시간 넘으면 자금 묶임 방지 정리
+                        elif minutes_held >= 35:
+                            # v5.28: 35분 넘으면 자금 묶임 방지 정리
                             print(f"  🔚 {coin} {batch_id} 횡보 {hours:.1f}시간 + 모멘텀{momentum:.0f}점↓ → 정리")
                             self.place_sell_order(coin, batch_id)
                             self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False}
@@ -5170,10 +5443,29 @@ if __name__ == "__main__":
     import sys
     import faulthandler
     faulthandler.enable()  # segfault 시 traceback 출력
+    # ── 모드 잠금: real 모드는 잠금 파일 필요 ──
+    # real 모드 실행하려면 먼저 다음 명령 실행:
+    #   echo "REAL_UNLOCK" > ~/Desktop/업비트자동/.mode_unlock
+    # 잠금 파일은 1회 사용 후 자동 삭제됨
+    UNLOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".mode_unlock")
+
     if len(sys.argv) > 1 and sys.argv[1] in ["demo", "real"]:
         mode = sys.argv[1]
     else:
         mode = "demo"
+
+    if mode == "real":
+        unlock_ok = False
+        if os.path.exists(UNLOCK_FILE):
+            with open(UNLOCK_FILE, "r") as f:
+                if f.read().strip() == "REAL_UNLOCK":
+                    unlock_ok = True
+                    os.remove(UNLOCK_FILE)  # 1회용: 즉시 삭제
+        if not unlock_ok:
+            print("🔒 [보안] real 모드가 잠겨있습니다!")
+            print("   잠금 해제: echo 'REAL_UNLOCK' > ~/Desktop/업비트자동/.mode_unlock")
+            print("   → demo 모드로 대체 실행합니다.")
+            mode = "demo"
 
     autorun = "--auto" in sys.argv
     # 스캔 주기(분), 기본 5분
@@ -5261,10 +5553,10 @@ if __name__ == "__main__":
                     us_state, _ = bot.check_us_market()
                     last_market_check = now
 
-                # v5.24: surge 재활성화 (모멘텀30+ AI토론 필수, 거래량 동적 보유)
-                if bot._surge_positions or bot._surge_watchlist:
-                    with bot._trade_lock:
-                        bot.surge_trade()
+                # v5.28: surge OFF — batch 전략에 집중 (surge 전체 -77만원 구조적 손실)
+                # if bot._surge_positions or bot._surge_watchlist:
+                #     with bot._trade_lock:
+                #         bot.surge_trade()
 
                 # 거래 사이클 (3분마다)
                 if now - last_trade_cycle >= TRADE_INTERVAL:
@@ -5283,7 +5575,8 @@ if __name__ == "__main__":
                         bot.monitor_positions()
 
                     bot.idle_fund_trade()
-                    bot.surge_trade()
+                    # v5.28: surge OFF
+                    # bot.surge_trade()
 
                 # v5.6: 대시보드 업데이트 (5분마다)
                 if now - last_dashboard >= DASHBOARD_INTERVAL:

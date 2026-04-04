@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>🚀 업비트 자동매매 봇 v1.1.6</title>
+<title>🚀 업비트 자동매매 봇 v1.2.0</title>
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -97,13 +97,34 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 .mkt .badge { font-size: 13px; font-weight: 700; padding: 3px 10px; border-radius: 6px; }
 .mkt .info { flex: 1; font-size: 11px; color: #8b949e; }
 .mkt .coins { font-size: 11px; }
+.mode-bar { display: flex; align-items: center; gap: 8px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+.mode-bar .label { font-size: 12px; color: #8b949e; }
+.mode-bar .mode-tag { font-size: 13px; font-weight: 700; padding: 3px 10px; border-radius: 6px; }
+.mode-bar .mode-tag.demo { background: #1f6feb22; color: #58a6ff; }
+.mode-bar .mode-tag.real { background: #f8514922; color: #f85149; }
+.mode-toggle { margin-left: auto; position: relative; width: 48px; height: 26px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.mode-toggle input { display: none; }
+.mode-toggle .slider { position: absolute; inset: 0; background: #1f6feb; border-radius: 13px; transition: .3s; }
+.mode-toggle .slider::before { content: ''; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .3s; }
+.mode-toggle input:checked + .slider { background: #f85149; }
+.mode-toggle input:checked + .slider::before { transform: translateX(22px); }
+.mom-gauge { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+.mom-gauge h3 { font-size: 12px; color: #58a6ff; margin-bottom: 8px; }
+.mom-bar-row { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; font-size: 11px; }
+.mom-bar-row .coin { min-width: 48px; font-weight: 600; color: #c9d1d9; }
+.mom-bar-row .score { min-width: 36px; text-align: right; font-weight: 600; }
+.mom-bar-row .track { flex: 1; height: 14px; background: #1c2028; border-radius: 3px; overflow: hidden; position: relative; }
+.mom-bar-row .fill { height: 100%; border-radius: 3px; transition: width .5s; }
+.mom-bar-row .threshold-line { position: absolute; top: 0; height: 100%; width: 2px; background: #f0c040; z-index: 1; }
+.mom-stats { display: flex; justify-content: space-between; margin-top: 8px; font-size: 10px; color: #484f58; }
+.mom-stats .val { color: #8b949e; font-weight: 600; }
 </style>
 <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
 </head>
 <body>
 <div class="hdr">
-  <h1><span class="dot" id="dot"></span>🚀 업비트 자동매매 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.1.6</span></h1>
+  <h1><span class="dot" id="dot"></span>🚀 업비트 자동매매 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.2.0</span></h1>
   <div><span class="tm" id="tm"></span> <span class="menu-btn" onclick="toggleMenu()">☰</span></div>
 </div>
 <div id="overlay" class="overlay" onclick="toggleMenu()"></div>
@@ -156,15 +177,56 @@ function render(d) {
   const pnlPct = ((d.balance - 10000000) / 100000).toFixed(2);
   const maxBar = Math.max(...d.daily.map(x => Math.abs(x.pnl)), 1);
 
+  // Mode bar
+  const mode = d.bot_mode || 'demo';
+  const modeIsReal = mode === 'real';
+  let html = `<div class="mode-bar">
+    <span class="label">모드</span>
+    <span class="mode-tag ${mode}">${mode.toUpperCase()}</span>
+    <span class="label" style="flex:1;text-align:center;font-size:10px;color:#484f58">${modeIsReal ? '실전 거래 중' : '가상 매매 중'}</span>
+    <label class="mode-toggle" title="${modeIsReal ? 'DEMO로 전환' : 'REAL로 전환'}">
+      <input type="checkbox" ${modeIsReal ? 'checked' : ''} onchange="toggleMode(this.checked)">
+      <span class="slider"></span>
+    </label>
+  </div>`;
+
   // Market index
   const m = d.market || {};
-  let html = '';
   if (m.grade) {
     html += `<div class="mkt">
       <span class="badge" style="background:${m.color}22;color:${m.color}">${m.grade}</span>
       <span class="info">${m.detail || ''}</span>
       <span class="coins">BTC <span class="${pc(m.btc_chg)}">${m.btc_chg>=0?'+':''}${m.btc_chg}%</span> · ALT <span class="${pc(m.alt_chg)}">${m.alt_chg>=0?'+':''}${m.alt_chg}%</span></span>
     </div>`;
+  }
+
+  // Momentum gauge
+  const mom = d.momentum || {};
+  if (mom.top10 && mom.top10.length > 0) {
+    const maxScore = Math.max(mom.top10[0].score, 50);
+    const thresh = mom.threshold || 0;
+    const pct = mom.market_pct || {};
+    html += `<div class="mom-gauge"><h3>모멘텀 현황</h3>`;
+    mom.top10.forEach((item, i) => {
+      const pctW = Math.min(100, item.score / maxScore * 100);
+      const passThresh = item.score >= thresh;
+      const color = passThresh ? '#3fb950' : (item.score >= thresh * 0.8 ? '#f0c040' : '#484f58');
+      html += `<div class="mom-bar-row">
+        <span class="coin">${i+1}. ${item.coin}</span>
+        <div class="track">
+          ${thresh > 0 ? `<div class="threshold-line" style="left:${Math.min(100,thresh/maxScore*100)}%"></div>` : ''}
+          <div class="fill" style="width:${pctW}%;background:${color}"></div>
+        </div>
+        <span class="score" style="color:${color}">${item.score}</span>
+      </div>`;
+    });
+    html += `<div class="mom-stats">
+      <span>기준선: <span class="val">${thresh}점</span></span>
+      ${pct.p10 ? `<span>TOP10%: <span class="val">${pct.p10}</span></span>` : ''}
+      ${pct.p20 ? `<span>TOP20%: <span class="val">${pct.p20}</span></span>` : ''}
+      ${pct.median ? `<span>중위: <span class="val">${pct.median}</span></span>` : ''}
+    </div>`;
+    html += `</div>`;
   }
 
   html += `
@@ -398,6 +460,36 @@ function showMore() {
 
 load();
 setInterval(load, 30000);
+
+// 모드 전환 (기존 채팅 시스템 활용: Firebase + Telegram)
+async function toggleMode(toReal) {
+  const target = toReal ? 'real' : 'demo';
+  const current = toReal ? 'demo' : 'real';
+  if (toReal) {
+    if (!confirm('⚠️ REAL 모드로 전환하시겠습니까?\n\n실제 자금으로 거래됩니다.\n서버에 잠금해제 파일이 필요합니다.')) {
+      // 체크박스 원복
+      document.querySelector('.mode-toggle input').checked = !toReal;
+      return;
+    }
+  }
+  const cfg = getTgConfig();
+  if (!cfg) { alert('텔레그램 설정이 필요합니다.'); document.querySelector('.mode-toggle input').checked = !toReal; return; }
+
+  // Firebase 채팅으로 명령 전송
+  const now = new Date();
+  const time = `${now.getMonth()+1}/${now.getDate()} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+  await chatRef.add({ type: 'me', text: `/mode ${target}`, time, ts: firebase.firestore.FieldValue.serverTimestamp(), _ts: Date.now() });
+
+  // 텔레그램으로도 전송
+  try {
+    await fetch(`https://api.telegram.org/bot${cfg.token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: cfg.chatId, text: `/mode ${target}` })
+    });
+  } catch {}
+  alert(`${target.toUpperCase()} 모드 전환 명령을 전송했습니다.\n봇이 재시작되면 반영됩니다.`);
+}
 
 // Firebase 채팅 (실시간)
 const fbApp = firebase.initializeApp({

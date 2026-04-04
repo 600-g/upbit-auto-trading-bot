@@ -45,9 +45,20 @@ find "$LOG_DIR" -name "trading_log_*.json" -mtime +1 -delete 2>/dev/null
 
 start_bot() {
     cd "$BOT_DIR"
-    nohup "$PYTHON" -u "$BOT_SCRIPT" demo --auto >> "$BOT_STDOUT" 2>&1 &
+    # mode.conf에서 모드 읽기 (없으면 demo)
+    MODE_FILE="${BOT_DIR}/mode.conf"
+    BOT_MODE="demo"
+    if [ -f "$MODE_FILE" ]; then
+        BOT_MODE=$(cat "$MODE_FILE" | tr -d '[:space:]')
+    fi
+    # 안전장치: real이 아니면 무조건 demo
+    if [ "$BOT_MODE" != "real" ]; then
+        BOT_MODE="demo"
+    fi
+    nohup "$PYTHON" -u "$BOT_SCRIPT" "$BOT_MODE" --auto >> "$BOT_STDOUT" 2>&1 &
     NEW_PID=$!
     echo "$NEW_PID" > "$PID_FILE"
+    log_msg "봇 시작 (모드: $BOT_MODE, PID: $NEW_PID)"
 }
 
 # PID 파일 존재 여부 확인

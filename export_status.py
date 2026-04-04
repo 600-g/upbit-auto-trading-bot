@@ -125,14 +125,61 @@ def export():
     except:
         pass
 
-    # Bot running
+    # Bot running + mode
     bot_running = False
+    bot_mode = 'demo'
     try:
         if os.path.exists(PID_PATH):
             with open(PID_PATH) as f:
                 pid = int(f.read().strip())
             os.kill(pid, 0)
             bot_running = True
+    except:
+        pass
+    mode_path = os.path.join(BASE_DIR, 'mode.conf')
+    try:
+        if os.path.exists(mode_path):
+            with open(mode_path) as f:
+                bot_mode = f.read().strip() or 'demo'
+    except:
+        pass
+
+    # 모멘텀 분포 (봇 로그에서 최신 스캔 결과 파싱)
+    momentum_info = {'top10': [], 'threshold': 0, 'market_pct': {}}
+    try:
+        import re
+        log_path = os.path.join(BASE_DIR, 'bot_output.log')
+        if os.path.exists(log_path):
+            with open(log_path, 'rb') as f:
+                # 마지막 20KB에서 최신 모멘텀 데이터 추출
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 20000))
+                tail = f.read().decode('utf-8', errors='ignore')
+
+            # TOP 10 파싱
+            top10_blocks = re.findall(r'📊 모멘텀 TOP 10:\n((?:  \d+\. .+\n)+)', tail)
+            if top10_blocks:
+                last_block = top10_blocks[-1]
+                for line in last_block.strip().split('\n'):
+                    m = re.match(r'\s+\d+\.\s+(\w+):\s+([\d.]+)점', line)
+                    if m:
+                        momentum_info['top10'].append({'coin': m.group(1), 'score': float(m.group(2))})
+
+            # 분포 파싱
+            dist_match = re.findall(r'📉 분포: TOP10%=([\d.]+) \| TOP20%=([\d.]+) \| 중위=([\d.]+)', tail)
+            if dist_match:
+                last = dist_match[-1]
+                momentum_info['market_pct'] = {'p10': float(last[0]), 'p20': float(last[1]), 'median': float(last[2])}
+
+            # 기준점 파싱
+            thresh_match = re.findall(r'기준: TOP\d+% = ([\d.]+)점', tail)
+            if thresh_match:
+                momentum_info['threshold'] = float(thresh_match[-1])
+            else:
+                thresh_match2 = re.findall(r'최소 신호: (\d+)점', tail)
+                if thresh_match2:
+                    momentum_info['threshold'] = float(thresh_match2[-1])
     except:
         pass
 
@@ -243,8 +290,10 @@ def export():
         'hourly': hourly,
         'surge_watchlist': surge_watchlist,
         'bot_running': bot_running,
+        'bot_mode': bot_mode,
+        'momentum': momentum_info,
         'market': market,
-        'version': '1.1.6',
+        'version': '1.2.0',
         'updated': datetime.now().strftime('%m/%d %H:%M:%S')
     }
 
