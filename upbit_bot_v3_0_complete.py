@@ -551,6 +551,7 @@ class TradingBotV3:
                         doc_name = doc.get("name", "")
 
                         if action == "switch" and target in ("demo", "real"):
+                            pin = fields.get("pin", {}).get("stringValue", "")
                             # 문서 즉시 삭제 (중복 처리 방지)
                             try:
                                 req_lib.delete(f"https://firestore.googleapis.com/v1/{doc_name}", timeout=5)
@@ -559,9 +560,9 @@ class TradingBotV3:
                             # 모드 전환
                             if target != self.mode:
                                 print(f"🌐 [대시보드] 모드 전환 요청: {self.mode} → {target}")
+                                self._pending_mode_pin = pin
                                 self._cmd_mode_switch(target)
                             else:
-                                # 상태 확인 응답
                                 self._firebase_write_status()
             except Exception as e:
                 if "timeout" not in str(e).lower():
@@ -752,18 +753,23 @@ class TradingBotV3:
             self._tg_send(f"ℹ️ 이미 {self.mode.upper()} 모드입니다.")
             return
 
-        # real 전환 시 보안 잠금 확인
+        # real 전환 시 PIN 확인 (Firebase 제어에서 pin 필드로 전달)
         if target_mode == "real":
-            unlock_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".mode_unlock")
-            if not os.path.exists(unlock_file):
-                self._tg_send("🔒 real 모드 전환 불가: 잠금 파일이 없습니다.\n"
-                              "echo 'REAL_UNLOCK' > ~/Desktop/업비트자동/.mode_unlock 실행 후 재시도")
+            pin = getattr(self, '_pending_mode_pin', '')
+            self._pending_mode_pin = ''  # 1회용
+            if pin != "0910":
+                self._tg_send("🔒 real 모드 전환 불가: PIN이 올바르지 않습니다.")
+                # Firebase에 실패 상태 기록 (대시보드 피드백)
+                try:
+                    url = f"https://firestore.googleapis.com/v1/projects/{self._FB_PROJECT}/databases/(default)/documents/upbit_status/current"
+                    req_lib.patch(url, json={"fields": {
+                        "mode": {"stringValue": self.mode},
+                        "error": {"stringValue": "PIN_WRONG"},
+                        "updated": {"stringValue": datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}
+                    }}, timeout=5)
+                except:
+                    pass
                 return
-            with open(unlock_file, "r") as f:
-                if f.read().strip() != "REAL_UNLOCK":
-                    self._tg_send("🔒 real 모드 전환 불가: 잠금 파일이 올바르지 않습니다.")
-                    return
-            os.remove(unlock_file)
 
         # mode.conf 저장
         with open(mode_conf, "w") as f:
@@ -5498,19 +5504,15 @@ if __name__ == "__main__":
     import sys
     import faulthandler
     faulthandler.enable()  # segfault 시 traceback 출력
-    # ── 모드 잠금: real 모드는 잠금 파일 필요 ──
-    # real 모드 실행하려면 먼저 다음 명령 실행:
-    #   echo "REAL_UNLOCK" > ~/Desktop/업비트자동/.mode_unlock
-    # 잠금 파일은 1회 사용 후 자동 삭제됨
-    UNLOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".mode_unlock")
-
+    # ── 모드 보안: real 모드는 대시보드 PIN 인증 또는 mode.conf 필요 ──
     if len(sys.argv) > 1 and sys.argv[1] in ["demo", "real"]:
         mode = sys.argv[1]
     else:
         mode = "demo"
 
     if mode == "real":
-        # mode.conf에 real이 기록되어 있으면 _cmd_mode_switch에서 이미 인증된 전환
+        # mode.conf에 real이 기록되어 있어야만 real 진입 허용
+        # (대시보드 PIN 인증 → _cmd_mode_switch → mode.conf 기록 → os.execv)
         mode_conf_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mode.conf")
         mode_conf_val = ""
         try:
@@ -5521,21 +5523,11 @@ if __name__ == "__main__":
             pass
 
         if mode_conf_val == "real":
-            # mode.conf 인증 통과 (이미 _cmd_mode_switch에서 보안 검증 완료)
             print("🔓 [보안] mode.conf 인증으로 real 모드 진입")
         else:
-            # 직접 CLI 실행 → 잠금 파일 필요
-            unlock_ok = False
-            if os.path.exists(UNLOCK_FILE):
-                with open(UNLOCK_FILE, "r") as f:
-                    if f.read().strip() == "REAL_UNLOCK":
-                        unlock_ok = True
-                        os.remove(UNLOCK_FILE)  # 1회용: 즉시 삭제
-            if not unlock_ok:
-                print("🔒 [보안] real 모드가 잠겨있습니다!")
-                print("   잠금 해제: echo 'REAL_UNLOCK' > ~/Desktop/업비트자동/.mode_unlock")
-                print("   → demo 모드로 대체 실행합니다.")
-                mode = "demo"
+            print("🔒 [보안] real 모드 직접 실행 차단 (대시보드 PIN 인증 필요)")
+            print("   → demo 모드로 대체 실행합니다.")
+            mode = "demo"
 
     autorun = "--auto" in sys.argv
     # 스캔 주기(분), 기본 5분
