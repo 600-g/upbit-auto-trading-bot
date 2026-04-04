@@ -528,6 +528,61 @@ class TradingBotV3:
         t.start()
         print("✅ 텔레그램 명령어 수신 대기 중...")
 
+        # v6.0: Firebase 제어 채널 폴링 (대시보드 모드 토글용)
+        t2 = threading.Thread(target=self._firebase_control_poll, daemon=True)
+        t2.start()
+        print("✅ Firebase 제어 채널 대기 중...")
+
+    # Firebase 제어 상수
+    _FB_PROJECT = "datemap-759bf"
+    _FB_CONTROL_URL = f"https://firestore.googleapis.com/v1/projects/{_FB_PROJECT}/databases/(default)/documents/upbit_control"
+
+    def _firebase_control_poll(self):
+        """Firebase upbit_control 컬렉션 폴링 (5초 간격)"""
+        while True:
+            try:
+                resp = req_lib.get(self._FB_CONTROL_URL, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for doc in data.get("documents", []):
+                        fields = doc.get("fields", {})
+                        action = fields.get("action", {}).get("stringValue", "")
+                        target = fields.get("mode", {}).get("stringValue", "")
+                        doc_name = doc.get("name", "")
+
+                        if action == "switch" and target in ("demo", "real"):
+                            # 문서 즉시 삭제 (중복 처리 방지)
+                            try:
+                                req_lib.delete(f"https://firestore.googleapis.com/v1/{doc_name}", timeout=5)
+                            except:
+                                pass
+                            # 모드 전환
+                            if target != self.mode:
+                                print(f"🌐 [대시보드] 모드 전환 요청: {self.mode} → {target}")
+                                self._cmd_mode_switch(target)
+                            else:
+                                # 상태 확인 응답
+                                self._firebase_write_status()
+            except Exception as e:
+                if "timeout" not in str(e).lower():
+                    print(f"⚠️ Firebase 제어 폴링 오류: {e}")
+            time.sleep(5)
+
+    def _firebase_write_status(self):
+        """현재 봇 상태를 Firebase upbit_status 문서에 기록"""
+        try:
+            url = f"https://firestore.googleapis.com/v1/projects/{self._FB_PROJECT}/databases/(default)/documents/upbit_status/current"
+            data = {"fields": {
+                "mode": {"stringValue": self.mode},
+                "running": {"booleanValue": True},
+                "balance": {"doubleValue": self.current_balance},
+                "positions": {"integerValue": str(len(self.positions))},
+                "updated": {"stringValue": datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}
+            }}
+            req_lib.patch(url, json=data, timeout=5)
+        except:
+            pass
+
     def _telegram_poll_loop(self):
         """텔레그램 메시지 폴링 (5초 간격)"""
         while True:
@@ -5455,17 +5510,32 @@ if __name__ == "__main__":
         mode = "demo"
 
     if mode == "real":
-        unlock_ok = False
-        if os.path.exists(UNLOCK_FILE):
-            with open(UNLOCK_FILE, "r") as f:
-                if f.read().strip() == "REAL_UNLOCK":
-                    unlock_ok = True
-                    os.remove(UNLOCK_FILE)  # 1회용: 즉시 삭제
-        if not unlock_ok:
-            print("🔒 [보안] real 모드가 잠겨있습니다!")
-            print("   잠금 해제: echo 'REAL_UNLOCK' > ~/Desktop/업비트자동/.mode_unlock")
-            print("   → demo 모드로 대체 실행합니다.")
-            mode = "demo"
+        # mode.conf에 real이 기록되어 있으면 _cmd_mode_switch에서 이미 인증된 전환
+        mode_conf_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mode.conf")
+        mode_conf_val = ""
+        try:
+            if os.path.exists(mode_conf_path):
+                with open(mode_conf_path, "r") as f:
+                    mode_conf_val = f.read().strip()
+        except:
+            pass
+
+        if mode_conf_val == "real":
+            # mode.conf 인증 통과 (이미 _cmd_mode_switch에서 보안 검증 완료)
+            print("🔓 [보안] mode.conf 인증으로 real 모드 진입")
+        else:
+            # 직접 CLI 실행 → 잠금 파일 필요
+            unlock_ok = False
+            if os.path.exists(UNLOCK_FILE):
+                with open(UNLOCK_FILE, "r") as f:
+                    if f.read().strip() == "REAL_UNLOCK":
+                        unlock_ok = True
+                        os.remove(UNLOCK_FILE)  # 1회용: 즉시 삭제
+            if not unlock_ok:
+                print("🔒 [보안] real 모드가 잠겨있습니다!")
+                print("   잠금 해제: echo 'REAL_UNLOCK' > ~/Desktop/업비트자동/.mode_unlock")
+                print("   → demo 모드로 대체 실행합니다.")
+                mode = "demo"
 
     autorun = "--auto" in sys.argv
     # 스캔 주기(분), 기본 5분
@@ -5512,8 +5582,9 @@ if __name__ == "__main__":
         with open(pid_path, "w") as f:
             f.write(str(os.getpid()))
 
-        # 텔레그램 명령어 수신 시작
+        # 텔레그램 명령어 수신 + Firebase 제어 채널 시작
         bot._start_telegram_listener()
+        bot._firebase_write_status()  # 시작 시 상태 기록
 
         cycle = 0
         last_market_check = 0     # 시장 체크 타이머 (초)

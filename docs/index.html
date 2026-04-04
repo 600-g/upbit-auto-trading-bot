@@ -461,34 +461,79 @@ function showMore() {
 load();
 setInterval(load, 30000);
 
-// 모드 전환 (기존 채팅 시스템 활용: Firebase + Telegram)
+// 모드 전환 (Firebase upbit_control 직접 제어)
+const FB_REST = 'https://firestore.googleapis.com/v1/projects/datemap-759bf/databases/(default)/documents';
+
 async function toggleMode(toReal) {
   const target = toReal ? 'real' : 'demo';
-  const current = toReal ? 'demo' : 'real';
-  if (toReal) {
-    if (!confirm('⚠️ REAL 모드로 전환하시겠습니까?\n\n실제 자금으로 거래됩니다.\n서버에 잠금해제 파일이 필요합니다.')) {
-      // 체크박스 원복
-      document.querySelector('.mode-toggle input').checked = !toReal;
-      return;
-    }
+  const msg = toReal
+    ? '⚠️ REAL 모드로 전환하시겠습니까?\n\n실제 자금으로 거래됩니다.\n서버에 잠금해제 파일이 필요합니다.'
+    : '💡 DEMO 모드로 전환하시겠습니까?\n\n가상 매매로 전환됩니다.';
+  if (!confirm(msg)) {
+    document.querySelector('.mode-toggle input').checked = !toReal;
+    return;
   }
-  const cfg = getTgConfig();
-  if (!cfg) { alert('텔레그램 설정이 필요합니다.'); document.querySelector('.mode-toggle input').checked = !toReal; return; }
-
-  // Firebase 채팅으로 명령 전송
-  const now = new Date();
-  const time = `${now.getMonth()+1}/${now.getDate()} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-  await chatRef.add({ type: 'me', text: `/mode ${target}`, time, ts: firebase.firestore.FieldValue.serverTimestamp(), _ts: Date.now() });
-
-  // 텔레그램으로도 전송
   try {
-    await fetch(`https://api.telegram.org/bot${cfg.token}/sendMessage`, {
+    // Firebase upbit_control에 직접 명령 기록
+    const resp = await fetch(FB_REST + '/upbit_control', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: cfg.chatId, text: `/mode ${target}` })
+      body: JSON.stringify({ fields: {
+        action: { stringValue: 'switch' },
+        mode: { stringValue: target },
+        ts: { timestampValue: new Date().toISOString() }
+      }})
     });
-  } catch {}
-  alert(`${target.toUpperCase()} 모드 전환 명령을 전송했습니다.\n봇이 재시작되면 반영됩니다.`);
+    if (resp.ok) {
+      showToast(`${target.toUpperCase()} 모드 전환 요청 전송됨`, 'info');
+      // 상태 폴링 시작 (최대 30초 대기)
+      pollModeChange(target, 30);
+    } else {
+      throw new Error('Firebase 오류');
+    }
+  } catch(e) {
+    alert('모드 전환 실패: ' + e.message);
+    document.querySelector('.mode-toggle input').checked = !toReal;
+  }
+}
+
+// 모드 전환 결과 폴링
+async function pollModeChange(target, maxSec) {
+  const start = Date.now();
+  const poll = setInterval(async () => {
+    if (Date.now() - start > maxSec * 1000) {
+      clearInterval(poll);
+      showToast('전환 시간 초과 — 봇 상태를 확인하세요', 'warn');
+      return;
+    }
+    try {
+      const resp = await fetch(FB_REST + '/upbit_status/current', { cache: 'no-store' });
+      if (resp.ok) {
+        const doc = await resp.json();
+        const curMode = doc.fields?.mode?.stringValue;
+        if (curMode === target) {
+          clearInterval(poll);
+          showToast(`${target.toUpperCase()} 모드 전환 완료!`, 'ok');
+          load(); // 대시보드 새로고침
+        }
+      }
+    } catch {}
+  }, 3000);
+}
+
+// 토스트 알림
+function showToast(msg, type) {
+  const colors = { ok: '#3fb950', warn: '#f0c040', info: '#58a6ff', err: '#f85149' };
+  const el = document.createElement('div');
+  el.textContent = msg;
+  Object.assign(el.style, {
+    position: 'fixed', bottom: '20px', left: '50%', transform: 'translateX(-50%)',
+    background: colors[type] || '#30363d', color: '#fff', padding: '10px 20px',
+    borderRadius: '8px', fontSize: '13px', fontWeight: '600', zIndex: '999',
+    boxShadow: '0 4px 12px rgba(0,0,0,.4)', transition: 'opacity .3s'
+  });
+  document.body.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 3000);
 }
 
 // Firebase 채팅 (실시간)
@@ -503,10 +548,13 @@ const fbApp = firebase.initializeApp({
 const db = firebase.firestore();
 const chatRef = db.collection('upbit_chat');
 
+// 텔레그램 설정 (하드코딩 — 개인 도구)
+const TG_CFG = { token: '8481220569:AAHVSypL0kUN21ehhxG0uKGCz3PpIXkdm28', chatId: '8440882806' };
 function getTgConfig() {
-  const token = localStorage.getItem('tg_token');
-  const chatId = localStorage.getItem('tg_chat_id');
-  return (token && chatId) ? { token, chatId } : null;
+  // localStorage 우선, 없으면 하드코딩 기본값
+  const token = localStorage.getItem('tg_token') || TG_CFG.token;
+  const chatId = localStorage.getItem('tg_chat_id') || TG_CFG.chatId;
+  return { token, chatId };
 }
 
 function renderChat(messages) {
@@ -536,15 +584,16 @@ function renderChat(messages) {
 
 // 실시간 리스너
 function initChat() {
-  if (!getTgConfig()) {
-    document.getElementById('chatArea').style.display = 'none';
-    document.getElementById('chatSetup').style.display = 'block';
-    return;
-  }
+  // 항상 채팅 활성화 (하드코딩 기본값이 있으므로)
+  document.getElementById('chatArea').style.display = 'block';
+  document.getElementById('chatSetup').style.display = 'none';
   chatRef.orderBy('ts').limitToLast(50).onSnapshot(snap => {
     const msgs = [];
     snap.forEach(doc => msgs.push(doc.data()));
     renderChat(msgs);
+  }, err => {
+    console.warn('Firebase 채팅 오류:', err);
+    document.getElementById('chatLog').innerHTML = '<div style="text-align:center;color:#f85149;font-size:11px;padding:20px 0">채팅 연결 실패</div>';
   });
 }
 
@@ -575,12 +624,13 @@ async function sendChat() {
 
   // 텔레그램으로도 전송 (봇이 처리하도록)
   try {
-    await fetch(`https://api.telegram.org/bot${cfg.token}/sendMessage`, {
+    const tgResp = await fetch(`https://api.telegram.org/bot${cfg.token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: cfg.chatId, text: '📊 [대시보드]\n' + msg })
     });
-  } catch {}
+    if (!tgResp.ok) showToast('텔레그램 전송 실패', 'warn');
+  } catch(e) { showToast('텔레그램 연결 실패', 'err'); }
   input.focus();
 }
 
