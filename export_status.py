@@ -204,19 +204,19 @@ def export():
     except:
         pass
 
-    # 잔고: DB active_positions 우선, 없으면 누적 계산
-    krw_balance = 10000000 + total_pnl
+    # 잔고: 거래내역 기반으로 정확히 계산 (DB current_balance는 버그 가능)
+    # KRW 잔고 = 초기자금 - 매수총액 + 매도총액
     try:
-        c.execute('SELECT balance FROM active_positions LIMIT 1')
-        row = c.fetchone()
-        if row and row[0]:
-            krw_balance = row[0]
+        c.execute('SELECT SUM(CASE WHEN action="buy" THEN -amount ELSE amount END) FROM trades')
+        trade_flow = c.fetchone()[0] or 0
+        krw_balance = 10000000 + trade_flow
     except:
-        pass
-    # 총 자산 = KRW 잔고 + 포지션 평가액
+        krw_balance = 10000000 + total_pnl
+
+    # 포지션 평가액 (현재가 기준, 없으면 매수액)
     pos_value = sum(p.get('cur_amount', p.get('amount', 0)) for p in positions)
+    # 총 자산 = KRW + 포지션 평가
     balance = krw_balance + pos_value
-    # 총 손익 = 총 자산 - 초기 자금
     total_asset_pnl = balance - 10000000
 
     # 실전 모드: 업비트 실제 잔고 조회
