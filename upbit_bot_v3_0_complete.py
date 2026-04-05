@@ -3301,6 +3301,15 @@ class TradingBotV3:
             if coin not in self.positions or batch_id not in self.positions[coin]:
                 return False
 
+            # v6.1: 중복 매도 방지 — 이미 매도 기록이 있으면 차단
+            _sell_key = f"{coin}_{batch_id}_{id(self.positions[coin][batch_id])}"
+            if not hasattr(self, '_sell_guard'):
+                self._sell_guard = set()
+            if _sell_key in self._sell_guard:
+                print(f"⚠️ {coin} {batch_id} 중복 매도 차단")
+                return False
+            self._sell_guard.add(_sell_key)
+
             position = self.positions[coin][batch_id]
             price = self.get_price(coin)
 
