@@ -3847,12 +3847,14 @@ class TradingBotV3:
                     pass
 
             if momentum >= min_score or (coin_is_strong and momentum >= 30):
-                # v5.6: 45+ 모멘텀 예산 축소 (데이터: 45+ 리스크/리워드 0.4:1 역전)
-                # 80+ 집중투자 비활성화, 45+ 예산 절반
+                # v6.0: 고모멘텀일수록 예산 확대 (수익 좋을 때 더 당기기)
+                # 데이터: +3%이상 18건=+146만(전체 핵심), 고모멘텀이 기회
                 is_concentrate = False
-                if momentum >= 45:
-                    coin_budget = min(per_coin_budget // 2, available)
-                    print(f" ⚠️ 고모멘텀({momentum}점) 과열주의 → 예산 절반 {coin_budget:,}원", end="")
+                if momentum >= 60:
+                    coin_budget = min(int(per_coin_budget * 1.5), available)
+                    print(f" 🔥 고모멘텀({momentum}점) 확대 투자 → {coin_budget:,}원", end="")
+                elif momentum >= 45:
+                    coin_budget = min(per_coin_budget, available)
                 else:
                     coin_budget = min(per_coin_budget, available)
 
@@ -4789,12 +4791,13 @@ class TradingBotV3:
                     except:
                         pass
 
-                # 8분 타임아웃 (데이터: 5-8분 최적, 그 이후 급감)
-                if sell_reason is None and elapsed_min >= 8 and profit_rate < 0.005:
+                # v6.0: surge 타임아웃 확대 (급등은 오래 타야 수익)
+                # 수익 중이면 30분까지 홀딩, 손실이면 20분에 정리
+                if sell_reason is None and elapsed_min >= 20 and profit_rate < 0.003:
                     sell_reason = f"타임아웃 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
 
-                # 15분 최종 타임아웃
-                if sell_reason is None and elapsed_min >= 15:
+                # 30분 최종 타임아웃
+                if sell_reason is None and elapsed_min >= 30:
                     sell_reason = f"최종 타임아웃 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
 
                 # 4. +2% 이상 트레일링 스탑 활성화 (고점 대비 -0.7% 하락 시 매도)
@@ -5173,13 +5176,15 @@ class TradingBotV3:
                 if not hasattr(self, '_trailing_peaks'):
                     self._trailing_peaks = {}
 
-                # v5.28: 트레일링 시작점 낮춤 (수익 보호 우선, 데이터: 15분내 익절이 수익 전부)
+                # v6.0: 트레일링 — 익절을 늘리고 큰 수익 노리기
+                # 데이터: 0~0.5% 익절 288건=+72만(찔끔), +3%이상 18건=+146만(핵심)
+                # → 트레일링 시작점을 올려서 조기 익절 방지, 큰 흐름 타기
                 if momentum >= 70:
-                    TRAILING_START = 0.015   # 고모멘텀: +1.5%부터 (기존 2%)
+                    TRAILING_START = 0.025   # 고모멘텀: +2.5%부터 (크게 먹기)
                 elif momentum >= 50:
-                    TRAILING_START = 0.010   # 중모멘텀: +1.0%부터 (기존 1.5%)
+                    TRAILING_START = 0.020   # 중모멘텀: +2.0%부터
                 else:
-                    TRAILING_START = 0.008   # 저모멘텀: +0.8% (기존 1.2%)
+                    TRAILING_START = 0.015   # 저모멘텀: +1.5%
 
                 if profit_rate >= TRAILING_START:
                     current_peak = self._trailing_peaks.get(trailing_key, 0)
@@ -5257,14 +5262,15 @@ class TradingBotV3:
                 if sr_sl_triggered:
                     continue
 
-                # 3-2. v5.28: 손절 — 백테스트 최적값 우선, 없으면 기본값
+                # v6.0: 손절 타이트하게 (데이터: BEST 날 평균손절 -0.62%, WORST -1.24%)
+                # 모든 구간 -0.7% 통일 — 빠른 손절이 총 수익을 지킨다
                 _bt_sl = getattr(self, '_bt_stop_loss', None)
                 if momentum < 20:
-                    stop_loss = _bt_sl['low'] if _bt_sl else -0.01
+                    stop_loss = _bt_sl['low'] if _bt_sl else -0.007
                 elif momentum < 40:
-                    stop_loss = _bt_sl['mid'] if _bt_sl else -0.015
+                    stop_loss = _bt_sl['mid'] if _bt_sl else -0.007
                 else:
-                    stop_loss = _bt_sl['high'] if _bt_sl else -0.02
+                    stop_loss = _bt_sl['high'] if _bt_sl else -0.01  # 고모멘텀만 -1% 여유
 
                 # v4.4: AutoTune 손절 조정
                 for _atr in self._autotune_rules:
@@ -5295,8 +5301,10 @@ class TradingBotV3:
                     except:
                         pass
 
-                # === 3.3c v4.3: 소액 수익 미니 트레일링 — +0.3% 도달 시 -0.15% 하락하면 익절 ===
-                if 0.003 <= profit_rate < TRAILING_START:
+                # === v6.0: 미니 트레일링 비활성화 (0.3% 찔끔 익절이 수익 구조를 망침) ===
+                # 데이터: 0~0.5% 익절 288건 = 대부분 여기서 빠져나감, 큰 수익 기회 상실
+                # 최소 15분 홀딩 전에는 익절하지 않음 (손절은 허용)
+                if False and 0.003 <= profit_rate < TRAILING_START:
                     mini_trail_key = f"{coin}_{batch_id}_mini_peak"
                     if not hasattr(self, '_mini_trail_peaks'):
                         self._mini_trail_peaks = {}
@@ -5324,8 +5332,8 @@ class TradingBotV3:
                     if hasattr(self, '_mini_trail_peaks') and mini_trail_key in self._mini_trail_peaks:
                         del self._mini_trail_peaks[mini_trail_key]
 
-                # === v5.28: 15분 횡보 조기 정리 (데이터: 15분내 익절 +215만 vs 15분+ 손실 구간) ===
-                if minutes_held >= 15 and minutes_held < 20 and abs(profit_rate) < 0.003 and momentum < 30 and not uptrend:
+                # === v6.0: 15분 횡보 조기 정리 — 수익 중이면 유지, 손실+횡보만 정리 ===
+                if minutes_held >= 15 and minutes_held < 20 and profit_rate < 0 and abs(profit_rate) < 0.003 and momentum < 25 and not uptrend:
                     print(f"⏰ {coin} {batch_id} 15분 횡보(±0.3% 미만) + 모멘텀{momentum:.0f}점↓ → 조기 정리")
                     self.place_sell_order(coin, batch_id)
                     self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False, 'early_exit': True, 'exit_price': price}
@@ -5588,7 +5596,9 @@ if __name__ == "__main__":
         NEWS_INTERVAL = 1800      # 30분
         AUTOTUNE_INTERVAL = 10800 # 3시간 (v4.5: 빠른 피드백 루프)
         DASHBOARD_INTERVAL = 300  # 5분마다 대시보드 업데이트
+        WARNING_INTERVAL = 600    # v6.0: 10분마다 유의종목 갱신
         last_dashboard = 0
+        last_warning_refresh = 0
 
         while True:
             try:
@@ -5616,10 +5626,29 @@ if __name__ == "__main__":
                     us_state, _ = bot.check_us_market()
                     last_market_check = now
 
-                # v5.28: surge OFF — batch 전략에 집중 (surge 전체 -77만원 구조적 손실)
-                # if bot._surge_positions or bot._surge_watchlist:
-                #     with bot._trade_lock:
-                #         bot.surge_trade()
+                # v6.0: 유의종목 갱신 (10분마다) + 보유 코인 강제 매도
+                if now - last_warning_refresh >= WARNING_INTERVAL:
+                    old_warnings = set(bot._warning_coins)
+                    bot.coins = bot._load_all_krw_coins()
+                    new_warnings = bot._warning_coins - old_warnings
+                    if new_warnings:
+                        bot._notify(f"🚨 신규 유의종목 감지: {', '.join(new_warnings)}")
+                        # 보유 중인 코인이 유의종목 전환되면 즉시 매도
+                        for coin in new_warnings:
+                            for batch_id in list(bot.positions.get(coin, {}).keys()):
+                                print(f"🚨 {coin} {batch_id} 투자유의 전환 → 긴급 매도!")
+                                bot.place_sell_order(coin, batch_id)
+                            if coin in bot._surge_positions:
+                                print(f"🚨 {coin} surge 투자유의 전환 → 긴급 매도!")
+                                # surge 매도 처리
+                            if coin in bot._scalp_positions:
+                                print(f"🚨 {coin} idle 투자유의 전환 → 긴급 매도!")
+                    last_warning_refresh = now
+
+                # v6.0: surge 재활성화 (타임아웃 확대+손절 타이트하게 개선됨)
+                if bot._surge_positions or bot._surge_watchlist:
+                    with bot._trade_lock:
+                        bot.surge_trade()
 
                 # 거래 사이클 (3분마다)
                 if now - last_trade_cycle >= TRADE_INTERVAL:
@@ -5638,8 +5667,7 @@ if __name__ == "__main__":
                         bot.monitor_positions()
 
                     bot.idle_fund_trade()
-                    # v5.28: surge OFF
-                    # bot.surge_trade()
+                    bot.surge_trade()
 
                 # v5.6: 대시보드 업데이트 (5분마다)
                 if now - last_dashboard >= DASHBOARD_INTERVAL:
