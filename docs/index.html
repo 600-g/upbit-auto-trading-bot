@@ -174,7 +174,8 @@ function render(d) {
   document.getElementById('dot').className = 'dot ' + (d.bot_running ? 'dot-on' : 'dot-off');
   document.getElementById('tm').textContent = d.updated;
 
-  const pnlPct = ((d.balance - 10000000) / 100000).toFixed(2);
+  const assetPnl = d.total_asset_pnl || (d.balance - 10000000);
+  const pnlPct = (assetPnl / 100000).toFixed(2);
   const maxBar = Math.max(...d.daily.map(x => Math.abs(x.pnl)), 1);
 
   // Mode bar
@@ -232,9 +233,9 @@ function render(d) {
   html += `
   <div class="g">
     <div class="c">
-      <div class="lb">잔고</div>
+      <div class="lb">총 자산</div>
       <div class="v">${fmt(Math.round(d.balance))}</div>
-      <div class="s ${pc(d.total_pnl)}">${ps(Math.round(d.total_pnl))}원 (${d.total_pnl>=0?'+':''}${pnlPct}%)</div>
+      <div class="s ${pc(assetPnl)}">${ps(Math.round(assetPnl))}원 (${assetPnl>=0?'+':''}${pnlPct}%)</div>
     </div>
     <div class="c">
       <div class="lb">승률</div>
@@ -254,16 +255,21 @@ function render(d) {
   </div>`;
 
   // Positions
-  const bn = {'batch_1':'1차','batch_2':'2차','batch_3':'3차','surge_trade':'급등'};
+  const bn = {'batch_1':'1차','batch_2':'2차','batch_3':'3차','surge_trade':'급등','idle_trade':'중타'};
   if (d.positions && d.positions.length > 0) {
-    html += '<div class="sec"><h2>보유 포지션</h2>';
+    const totalInvested = d.positions.reduce((s,p) => s + (p.cur_amount || p.amount || 0), 0);
+    const totalPnlPos = d.positions.reduce((s,p) => s + ((p.cur_amount||p.amount||0) - (p.amount||0)), 0);
+    html += `<div class="sec"><h2>보유 포지션 <span style="font-size:11px;font-weight:400;color:#8b949e">${d.positions.length}개 · 평가 ${fmt(totalInvested)}원 <span class="${pc(totalPnlPos)}">(${ps(Math.round(totalPnlPos))})</span></span></h2>`;
     d.positions.forEach(p => {
       const holdTxt = p.hold_min >= 60 ? `${Math.floor(p.hold_min/60)}시간 ${p.hold_min%60}분` : `${p.hold_min}분`;
       const curPrice = p.cur_price ? fmt(p.cur_price) : '-';
       const buyPrice = p.buy_price ? fmt(p.buy_price) : '-';
+      const curAmt = p.cur_amount ? fmt(p.cur_amount) : fmt(p.amount);
+      const pnlAmt = p.cur_amount ? p.cur_amount - p.amount : 0;
+      const batchCls = p.batch==='surge_trade'?'ts':p.batch==='idle_trade'?'td':'tb';
       html += `<div class="pos">
-        <div><div class="cn">${p.coin} <span class="tg ${p.batch==='surge_trade'?'ts':'tb'}">${bn[p.batch]||p.batch}</span></div>
-        <div class="dt">${fmt(p.amount)}원 · ${holdTxt}</div>
+        <div><div class="cn">${p.coin} <span class="tg ${batchCls}">${bn[p.batch]||p.batch}</span></div>
+        <div class="dt">${fmt(p.amount)}원 → ${curAmt}원 <span class="${pc(pnlAmt)}">(${ps(Math.round(pnlAmt))})</span> · ${holdTxt}</div>
         <div class="dt">매수 ${buyPrice} → 현재 ${curPrice}</div></div>
         <div class="pr ${pc(p.profit_rate)}">${p.profit_rate>=0?'+':''}${p.profit_rate.toFixed(2)}%</div>
       </div>`;
@@ -322,12 +328,31 @@ function render(d) {
   });
   html += '</div>';
 
+  // Recent trades (일별 손익 바로 아래)
+  const bnShort = {'batch_1':'1차','batch_2':'2차','batch_3':'3차','surge_trade':'급등','idle_trade':'중타'};
+  html += '<div class="sec"><h2>최근 거래</h2><table><tr><th>시간</th><th>코인</th><th>손익</th><th></th></tr>';
+  d.recent.forEach((t, i) => {
+    const tm = t.time.length > 5 ? t.time.slice(-5) : t.time;
+    const pft = ps(Math.round(t.profit));
+    const pct = `${t.profit_rate>=0?'+':''}${t.profit_rate.toFixed(1)}%`;
+    const hide = i >= 5 ? ' style="display:none" class="trade-row"' : ' class="trade-row"';
+    html += `<tr${hide}><td>${tm}</td><td>${t.coin}</td>
+      <td class="${pc(t.profit)}">${pft}(${pct})</td>
+      <td><span class="tg ${t.batch==='surge_trade'?'ts':t.batch==='idle_trade'?'td':'tb'}">${bnShort[t.batch]||t.batch}</span></td></tr>`;
+  });
+  html += '</table>';
+  if (d.recent.length > 5) {
+    html += `<div class="more-btn" id="moreBtn" onclick="showMore()">더보기 ▾</div>`;
+  }
+  html += '</div>';
+
   // Batches
   const batchNames = {
     'batch_1': '1차 매수',
     'batch_2': '2차 매수',
     'batch_3': '3차 매수',
-    'surge_trade': '급등'
+    'surge_trade': '급등',
+    'idle_trade': '중타'
   };
   // 시간대별 히트맵
   if (d.hourly && d.hourly.length > 0) {
@@ -389,24 +414,6 @@ function render(d) {
     }
     document.getElementById('logList').innerHTML = logHtml;
   }
-
-  // Recent trades (5개씩 더보기)
-  const bnShort = {'batch_1':'1차','batch_2':'2차','batch_3':'3차','surge_trade':'급등'};
-  html += '<div class="sec"><h2>최근 거래</h2><table><tr><th>시간</th><th>코인</th><th>손익</th><th></th></tr>';
-  d.recent.forEach((t, i) => {
-    const tm = t.time.length > 5 ? t.time.slice(-5) : t.time;
-    const pft = ps(Math.round(t.profit));
-    const pct = `${t.profit_rate>=0?'+':''}${t.profit_rate.toFixed(1)}%`;
-    const hide = i >= 5 ? ' style="display:none" class="trade-row"' : ' class="trade-row"';
-    html += `<tr${hide}><td>${tm}</td><td>${t.coin}</td>
-      <td class="${pc(t.profit)}">${pft}(${pct})</td>
-      <td><span class="tg ${t.batch==='surge_trade'?'ts':'tb'}">${bnShort[t.batch]||t.batch}</span></td></tr>`;
-  });
-  html += '</table>';
-  if (d.recent.length > 5) {
-    html += `<div class="more-btn" id="moreBtn" onclick="showMore()">더보기 ▾</div>`;
-  }
-  html += '</div>';
 
   document.getElementById('app').innerHTML = html;
   if (d.version) {

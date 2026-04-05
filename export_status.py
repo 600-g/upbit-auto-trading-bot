@@ -94,18 +94,38 @@ def export():
             now_ts = datetime.now().timestamp()
             all_coins = []
 
+            def _parse_ts(ts_val):
+                if isinstance(ts_val, (int, float)):
+                    return ts_val
+                try:
+                    return datetime.fromisoformat(str(ts_val)).timestamp()
+                except:
+                    return now_ts
+
             # 일반 배치 포지션
             for coin, bs in pd.get('positions', {}).items():
                 for bid, p in bs.items():
                     all_coins.append(coin)
-                    hm = int((now_ts - p.get('timestamp', now_ts)) / 60)
-                    positions.append({'coin': coin, 'batch': bid, 'buy_price': p.get('buy_price', 0), 'amount': p.get('amount', 0), 'profit_rate': 0, 'hold_min': hm})
+                    hm = max(0, int((now_ts - _parse_ts(p.get('timestamp', now_ts))) / 60))
+                    positions.append({'coin': coin, 'batch': bid, 'buy_price': p.get('buy_price', 0),
+                                      'amount': p.get('amount', 0), 'quantity': p.get('quantity', 0),
+                                      'profit_rate': 0, 'hold_min': hm})
 
             # surge 포지션
             for coin, p in pd.get('surge', {}).items():
                 all_coins.append(coin)
-                hm = int((now_ts - p.get('timestamp', now_ts)) / 60)
-                positions.append({'coin': coin, 'batch': 'surge_trade', 'buy_price': p.get('buy_price', 0), 'amount': p.get('amount', 0), 'profit_rate': 0, 'hold_min': hm})
+                hm = max(0, int((now_ts - _parse_ts(p.get('timestamp', now_ts))) / 60))
+                positions.append({'coin': coin, 'batch': 'surge_trade', 'buy_price': p.get('buy_price', 0),
+                                  'amount': p.get('amount', 0), 'quantity': p.get('quantity', 0),
+                                  'profit_rate': 0, 'hold_min': hm})
+
+            # scalp(idle) 포지션
+            for coin, p in pd.get('scalp', {}).items():
+                all_coins.append(coin)
+                hm = max(0, int((now_ts - _parse_ts(p.get('timestamp', now_ts))) / 60))
+                positions.append({'coin': coin, 'batch': 'idle_trade', 'buy_price': p.get('buy_price', 0),
+                                  'amount': p.get('amount', 0), 'quantity': p.get('quantity', 0),
+                                  'profit_rate': 0, 'hold_min': hm})
 
             surge_watchlist = len(pd.get('surge_watchlist', {}))
 
@@ -122,6 +142,7 @@ def export():
                         if bp and cur:
                             pos['cur_price'] = cur
                             pos['profit_rate'] = round((cur - bp) / bp * 100, 2)
+                            pos['cur_amount'] = round(cur * pos.get('quantity', 0))
     except:
         pass
 
@@ -184,14 +205,19 @@ def export():
         pass
 
     # 잔고: DB active_positions 우선, 없으면 누적 계산
-    balance = 10000000 + total_pnl
+    krw_balance = 10000000 + total_pnl
     try:
         c.execute('SELECT balance FROM active_positions LIMIT 1')
         row = c.fetchone()
         if row and row[0]:
-            balance = row[0]
+            krw_balance = row[0]
     except:
         pass
+    # 총 자산 = KRW 잔고 + 포지션 평가액
+    pos_value = sum(p.get('cur_amount', p.get('amount', 0)) for p in positions)
+    balance = krw_balance + pos_value
+    # 총 손익 = 총 자산 - 초기 자금
+    total_asset_pnl = balance - 10000000
 
     # 실전 모드: 업비트 실제 잔고 조회
     CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
@@ -274,7 +300,10 @@ def export():
 
     data = {
         'balance': balance,
+        'krw_balance': krw_balance,
+        'pos_value': pos_value,
         'total_pnl': total_pnl,
+        'total_asset_pnl': total_asset_pnl,
         'total_trades': total,
         'wins': wins, 'losses': losses, 'draws': draws,
         'win_rate': round(win_rate, 1),
