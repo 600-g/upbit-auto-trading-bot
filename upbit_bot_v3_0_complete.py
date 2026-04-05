@@ -371,24 +371,24 @@ class TradingBotV3:
         except Exception as e:
             print(f"⚠️ 포지션 복원 오류: {e} (빈 상태로 시작)")
 
-        # 잔고 교차검증: 거래 내역에서 계산한 잔고와 비교
+        # 잔고 교차검증
+        self._verify_balance()
+
+    def _verify_balance(self):
+        """거래내역 기반 잔고 교차검증 — 시작 시 + 매 사이클"""
         try:
             with self._db_lock:
+                # v6.1: 거래내역 기반 정확한 잔고 계산
+                # KRW = 초기자금 - 매수총액 + 매도총액
                 cursor = self.db.execute(
-                    "SELECT COUNT(*) FROM trades WHERE action='sell'"
+                    "SELECT COALESCE(SUM(CASE WHEN action='buy' THEN -amount WHEN action='sell' THEN amount ELSE 0 END), 0) FROM trades"
                 )
-                sell_count = cursor.fetchone()[0]
-            if sell_count > 0:
-                with self._db_lock:
-                    cursor = self.db.execute(
-                        "SELECT COALESCE(SUM(CASE WHEN action='sell' THEN profit ELSE 0 END), 0) FROM trades"
-                    )
-                    total_pnl = cursor.fetchone()[0]
-                calc_balance = self.initial_balance + total_pnl
-                if abs(self.current_balance - calc_balance) > 100:  # 100원 이상 차이
-                    print(f"⚠️ 잔고 불일치 감지: 저장 {self.current_balance:,.0f}원 vs 거래내역 {calc_balance:,.0f}원 → 거래내역 기준으로 보정")
-                    self.current_balance = calc_balance
-                    self._save_positions()
+                trade_flow = cursor.fetchone()[0]
+            calc_balance = self.initial_balance + trade_flow
+            if abs(self.current_balance - calc_balance) > 100:  # 100원 이상 차이
+                print(f"⚠️ 잔고 불일치 감지: 메모리 {self.current_balance:,.0f}원 vs 거래내역 {calc_balance:,.0f}원 → 보정")
+                self.current_balance = calc_balance
+                self._save_positions()
         except Exception as e:
             print(f"⚠️ 잔고 교차검증 오류: {e}")
 
@@ -5662,6 +5662,7 @@ if __name__ == "__main__":
                     print(f"🔄 사이클 #{cycle} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     print(f"{'='*60}")
                     bot.run_trading_cycle()
+                    bot._verify_balance()  # v6.1: 매 사이클 잔고 검증
                     bot.save_log()
                     bot._db_snapshot(cycle_num=cycle, market_state=getattr(bot, 'last_market_state', ''))
                     last_trade_cycle = now
