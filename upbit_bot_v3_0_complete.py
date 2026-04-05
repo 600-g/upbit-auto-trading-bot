@@ -3503,7 +3503,7 @@ class TradingBotV3:
         # v6.0: 상대적 모멘텀 기준 (백분위 방식)
         # 시장 전체가 죽어있으면 절대 기준(22점)은 의미 없음
         # → 현재 스캔 분포의 상위 N%를 기준으로 진입 여부 결정
-        ABSOLUTE_FLOOR = 12  # 데이터 기반: 12점 미만은 승률 28% + 건당 손실
+        ABSOLUTE_FLOOR = 15  # v6.1: 12→15 (v6.0 데이터: 12~15점 승률 20% 전패급)
         all_scores = sorted(self._last_scan_scores.values(), reverse=True) if self._last_scan_scores else []
 
         if all_scores and len(all_scores) >= 10:
@@ -3534,6 +3534,9 @@ class TradingBotV3:
             # v5.15: 심야 차단은 place_buy_order에서 처리, 여기서도 코인 스캔 생략
             print(f"🌙 심야({_cur_hour:02d}시) → 코인 스캔/진입 생략 (포지션 관리만)")
             return
+        elif _cur_hour >= 21:
+            min_score += 8  # v6.1: 21시+ 강력 방어 (데이터: 21시 8건 -11.7만)
+            print(f"🌙 야간({_cur_hour:02d}시) → 모멘텀 기준: {min_score}점")
         elif _cur_hour >= 18:
             min_score += 3  # 저녁: 약간 강화
             print(f"🌆 저녁({_cur_hour:02d}시) → 모멘텀 기준: {min_score}점")
@@ -5341,8 +5344,10 @@ class TradingBotV3:
 
                 # === v5.28: 타임아웃 — 백테스트 최적값 우선 (기본 20분) ===
                 _bt_timeout = getattr(self, '_bt_timeout_min', 20)
-                if minutes_held >= _bt_timeout and profit_rate < 0.003:
-                    print(f"⏰ {coin} {batch_id} 20분 타임아웃 ({profit_rate*100:+.2f}%, {minutes_held:.0f}분, 모멘텀{momentum:.0f}) → 정리")
+                # v6.1: 타임아웃 — 수익 중(+0.1%이상)이면 30분까지 확장, 손실만 20분에 정리
+                _effective_timeout = _bt_timeout + 10 if profit_rate >= 0.001 else _bt_timeout
+                if minutes_held >= _effective_timeout and profit_rate < 0.003:
+                    print(f"⏰ {coin} {batch_id} {_effective_timeout}분 타임아웃 ({profit_rate*100:+.2f}%, {minutes_held:.0f}분, 모멘텀{momentum:.0f}) → 정리")
                     self.place_sell_order(coin, batch_id)
                     self._sell_cooldown[coin] = {
                         'time': time.time(), 'stoploss': profit_rate < 0,
