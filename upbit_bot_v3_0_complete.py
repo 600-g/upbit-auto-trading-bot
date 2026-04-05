@@ -2419,15 +2419,30 @@ class TradingBotV3:
                     'reason': f'재진입 승률 {reentry_rate:.0f}% ({reentry_wins}/{len(reentry_results)}건)'
                 })
 
-        # --- 분석 6: 승패 기반 진입 기준 자동 조정 (v4.5) ---
+        # --- 분석 6: 배치별 성과 + 무승부 분석 (v6.1) ---
         win_count = sum(1 for _, pr, _ in sells if pr > 0)
+        draw_count = sum(1 for _, pr, _ in sells if pr == 0)
         total_sells = len(sells)
         win_rate = (win_count / total_sells * 100) if total_sells > 0 else 50
 
-        # v5.4: threshold_adjust 제거 — 기준 올리면 매매 안 됨 → 학습 데이터 부족 → 악순환
-        # 대신 승률이 낮으면 블랙리스트/쿨다운으로 대응 (위 분석 1, 5에서 처리)
         if total_sells >= 5:
-            print(f"🤖 [AutoTune] 승률: {win_rate:.0f}% ({win_count}/{total_sells}건)")
+            draw_rate = draw_count / total_sells * 100
+            print(f"🤖 [AutoTune] 승률: {win_rate:.0f}% ({win_count}/{total_sells}건) | 무승부: {draw_count}건({draw_rate:.0f}%)")
+
+            # 배치별 분석
+            try:
+                with self._db_lock:
+                    cursor = self.db.execute(
+                        "SELECT batch, COUNT(*), SUM(CASE WHEN profit>0 THEN 1 ELSE 0 END), SUM(profit) FROM trades WHERE action='sell' AND timestamp >= ? GROUP BY batch",
+                        (six_hours_ago,)
+                    )
+                    batch_stats = cursor.fetchall()
+                for batch, cnt, wins_b, pnl_b in batch_stats:
+                    wins_b = wins_b or 0
+                    wr_b = wins_b/cnt*100
+                    print(f"   {batch}: {cnt}건 승률{wr_b:.0f}% PnL{pnl_b or 0:+,.0f}원")
+            except:
+                pass
 
         # --- 분석 7: 승패 기반 모멘텀 가중치 자동 조정 (v4.5) ---
         # 매수 시 모멘텀 점수가 높았던 지표가 수익/손실과 상관관계 분석
@@ -3454,6 +3469,13 @@ class TradingBotV3:
                         current_price = self.get_price(coin)
                         if current_price:
                             price_drop = (current_price - batch1_pos['buy_price']) / batch1_pos['buy_price']
+
+                            # v6.1: 1차 손실이 -0.5% 이상이면 2차 추가매수 금지
+                            # 데이터: MMT 1차 -3.17% + 2차 -2.39% = -11.9만 (전체 손실 대부분)
+                            if price_drop <= -0.005:
+                                print(f"🚫 {coin} 2차 매수 취소: 1차 손실 {price_drop*100:+.2f}% ≤ -0.5% (추가 손실 방지)")
+                                del self._pending_2nd_buy[coin]
+                                continue
 
                             # 조건1: 현재가 < 1차 매수가 (진짜 물타기만)
                             if price_drop >= 0:
