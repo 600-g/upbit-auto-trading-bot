@@ -4825,14 +4825,18 @@ class TradingBotV3:
                     except:
                         pass
 
-                # v6.0: surge 타임아웃 확대 (급등은 오래 타야 수익)
-                # 수익 중이면 30분까지 홀딩, 손실이면 20분에 정리
-                if sell_reason is None and elapsed_min >= 20 and profit_rate < 0.003:
-                    sell_reason = f"타임아웃 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
-
-                # 30분 최종 타임아웃
-                if sell_reason is None and elapsed_min >= 30:
-                    sell_reason = f"최종 타임아웃 ({elapsed_min:.0f}분, {profit_rate*100:+.2f}%)"
+                # v6.2: surge도 거래량 기반 탈출 (시간 제한 제거)
+                if sell_reason is None and elapsed_min >= 10:
+                    _surge_vol_now = 0
+                    try:
+                        _surge_vol_now = self.analyze_volume(coin)
+                    except:
+                        pass
+                    # 거래량+수익 살아있으면 계속 홀딩
+                    if profit_rate >= 0.005 and _surge_vol_now >= 30:
+                        pass  # 트레일링이 보호
+                    elif _surge_vol_now < 20 and profit_rate < 0.003:
+                        sell_reason = f"거래량 소멸({_surge_vol_now}점, {profit_rate*100:+.2f}%, {elapsed_min:.0f}분)"
 
                 # 4. +2% 이상 트레일링 스탑 활성화 (고점 대비 -0.7% 하락 시 매도)
                 elif peak_rate >= 0.02 and (peak_rate - profit_rate) >= 0.007:
@@ -5366,74 +5370,47 @@ class TradingBotV3:
                     if hasattr(self, '_mini_trail_peaks') and mini_trail_key in self._mini_trail_peaks:
                         del self._mini_trail_peaks[mini_trail_key]
 
-                # === v6.0: 15분 횡보 조기 정리 — 수익 중이면 유지, 손실+횡보만 정리 ===
-                if minutes_held >= 15 and minutes_held < 20 and profit_rate < 0 and abs(profit_rate) < 0.003 and momentum < 25 and not uptrend:
-                    print(f"⏰ {coin} {batch_id} 15분 횡보(±0.3% 미만) + 모멘텀{momentum:.0f}점↓ → 조기 정리")
-                    self.place_sell_order(coin, batch_id)
-                    self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False, 'early_exit': True, 'exit_price': price}
+                # === v6.2: 거래량/모멘텀 기반 탈출 (시간 제한 제거) ===
+                # 원칙: 거래량+모멘텀 살아있으면 시간 무관 홀딩, 둘 다 죽으면 탈출
+                _vol_now = 0
+                try:
+                    _vol_now = self.analyze_volume(coin)
+                except:
+                    pass
+                _vol_alive = _vol_now >= 30
+                _mom_alive = momentum >= 20 or uptrend
+
+                # 1. 수익 중 + 에너지 살아있음 → 무제한 홀딩 (트레일링이 보호)
+                if profit_rate >= 0.003 and (_vol_alive or _mom_alive):
+                    if int(minutes_held) % 10 == 0 and minutes_held >= 10:
+                        print(f"  💎 {coin} {batch_id} 홀딩 ({profit_rate*100:+.2f}%, {minutes_held:.0f}분, 거래량{_vol_now}, 모멘텀{momentum:.0f})")
                     continue
 
-                # === v5.28: 타임아웃 — 백테스트 최적값 우선 (기본 20분) ===
-                _bt_timeout = getattr(self, '_bt_timeout_min', 20)
-                # v6.1: 타임아웃 — 수익 중(+0.1%이상)이면 30분까지 확장, 손실만 20분에 정리
-                _effective_timeout = _bt_timeout + 10 if profit_rate >= 0.001 else _bt_timeout
-                if minutes_held >= _effective_timeout and profit_rate < 0.003:
-                    print(f"⏰ {coin} {batch_id} {_effective_timeout}분 타임아웃 ({profit_rate*100:+.2f}%, {minutes_held:.0f}분, 모멘텀{momentum:.0f}) → 정리")
+                # 2. 거래량+모멘텀 동시 하락 + 10분 이상 → 탈출
+                if not _vol_alive and not _mom_alive and minutes_held >= 10:
+                    if profit_rate < 0.003:
+                        print(f"📉 {coin} {batch_id} 에너지 소멸 (거래량{_vol_now}점, 모멘텀{momentum:.0f}점) → 탈출 ({profit_rate*100:+.2f}%, {minutes_held:.0f}분)")
+                        self.place_sell_order(coin, batch_id)
+                        self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': profit_rate < 0, 'exit_price': price}
+                        continue
+
+                # 3. 거래량 완전 소멸 (10점 미만) → 유동성 위험, 강제 탈출
+                if _vol_now < 10 and minutes_held >= 15:
+                    print(f"🚨 {coin} {batch_id} 거래량 소멸({_vol_now}점) → 강제 탈출 ({profit_rate*100:+.2f}%, {minutes_held:.0f}분)")
                     self.place_sell_order(coin, batch_id)
-                    self._sell_cooldown[coin] = {
-                        'time': time.time(), 'stoploss': profit_rate < 0,
-                        'early_exit': True, 'exit_price': price
-                    }
+                    self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': profit_rate < 0, 'exit_price': price}
                     continue
 
-                # === 3.5 v5.28: 20분+ 손실 + 모멘텀 약 → 즉시 정리 ===
-                if minutes_held >= 20 and profit_rate < -0.003 and momentum < 30 and not uptrend:
-                    print(f"⏰ {coin} {batch_id} 30분+ 손실({profit_rate*100:+.2f}%) + 모멘텀 {momentum:.0f}점 → 정리")
-                    self.place_sell_order(coin, batch_id)
-                    self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False}
-                    continue
-
-                # === 4. v5.6: 횡보 처리 — 모멘텀 점검 후 판단 ===
-                # 원칙: 성급하게 팔아 수수료만 날리지 말고, 모멘텀/거래량 보고 판단
-                # 단, 지속 횡보면 자금 묶이지 않게 정리
-                if minutes_held >= 25 and abs(profit_rate) < 0.01 and not uptrend:
-                    _vol_ok = False
-                    try:
-                        _vol_score = self.analyze_volume(coin)
-                        _vol_ok = _vol_score >= 40
-                    except:
-                        pass
-
-                    if _vol_ok or momentum >= 30:
-                        # 거래량/모멘텀 살아있음 → 아직 기회 있으니 유지
-                        print(f"  ⏳ {coin} {batch_id} 횡보 {hours:.1f}시간 | {'거래량↑' if _vol_ok else ''} 모멘텀{momentum:.0f}점 → 유지")
-                    elif minutes_held >= 30:
-                        # v5.28: 30분+ 횡보 → 더 좋은 코인 있으면 스왑, 없으면 정리
-                        better = self._find_better_coin(coin, momentum)
-                        # v5.8: 포지션 슬롯 여유 있을 때만 스왑 (매도 후 매수 차단 방지)
-                        # 교체 후 남은 슬롯 = 현재 포지션 수 - 1(매도 예정) + 0(아직 미진입) → 항상 가능
-                        # 단, better 후보가 현 보유 종목이 아니어야 함
-                        if better and better[0] not in self.positions:
-                            print(f"🔄 {coin} {batch_id} 횡보 {hours:.1f}시간 ({profit_rate*100:+.2f}%) → {better[0]}({better[1]}점)으로 교체")
-                            sold = self.place_sell_order(coin, batch_id)
-                            if sold:
-                                time.sleep(2)
-                                bought = self.place_buy_order(better[0], position['amount'], momentum=better[1])
-                                # v5.8: 매수 실패 시 쿨다운 설정 (재진입 차단 방지)
-                                if not bought:
-                                    print(f"  ⚠️ {better[0]} 매수 실패 → 자금 유지, {coin} 쿨다운 해제")
-                            continue
-                        elif minutes_held >= 35:
-                            # v5.28: 35분 넘으면 자금 묶임 방지 정리
-                            print(f"  🔚 {coin} {batch_id} 횡보 {hours:.1f}시간 + 모멘텀{momentum:.0f}점↓ → 정리")
-                            self.place_sell_order(coin, batch_id)
-                            self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False}
-                            continue
-                        else:
-                            print(f"  ⚠️ {coin} {batch_id} 횡보 {hours:.1f}시간 + 모멘텀{momentum:.0f}점↓ (3h 후 정리)")
-                    else:
-                        # 45분~2시간: 아직 지켜볼 시간
-                        print(f"  ⏳ {coin} {batch_id} 횡보 {hours:.1f}시간 | 모멘텀{momentum:.0f}점 → 지켜보는 중")
+                # 4. 횡보 + 거래량 살아있음 → 더 좋은 코인 있으면 스왑
+                if abs(profit_rate) < 0.005 and minutes_held >= 30 and not _mom_alive:
+                    better = self._find_better_coin(coin, momentum)
+                    if better and better[0] not in self.positions:
+                        print(f"🔄 {coin} {batch_id} 횡보 {minutes_held:.0f}분 ({profit_rate*100:+.2f}%) → {better[0]}({better[1]}점)으로 교체")
+                        sold = self.place_sell_order(coin, batch_id)
+                        if sold:
+                            time.sleep(2)
+                            self.place_buy_order(better[0], position['amount'], momentum=better[1])
+                        continue
 
                 # 상태 출력
                 status = "📈 상승중" if uptrend else "➡️ 횡보" if abs(profit_rate) < 0.01 else "📉 하락중"
