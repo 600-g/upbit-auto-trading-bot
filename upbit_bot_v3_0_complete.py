@@ -1066,14 +1066,14 @@ class TradingBotV3:
             return None
 
     def analyze_volume(self, coin):
-        """거래량 분석 (0~100점)"""
+        """거래량 분석 (0~100점) — v6.3: 5분봉 기반 단기 거래량"""
         try:
             ticker = f"KRW-{coin}"
-            ohlcv = pyupbit.get_ohlcv(ticker, interval="minute60", count=24)
+            ohlcv = pyupbit.get_ohlcv(ticker, interval="minute5", count=12)  # 최근 1시간(5분*12)
 
             volumes = [x for x in ohlcv['volume']]
-            current = volumes[-1]
-            avg = np.mean(volumes[:-1])
+            current = np.mean(volumes[-2:])  # 최근 10분 평균
+            avg = np.mean(volumes[:-2])  # 이전 50분 평균
 
             ratio = current / avg if avg > 0 else 1
 
@@ -1083,13 +1083,46 @@ class TradingBotV3:
                 return 80
             elif ratio >= 1.5:
                 return 60
-            elif ratio >= 1.2:
-                return 40
             elif ratio >= 1.0:
+                return 40
+            elif ratio >= 0.5:
                 return 20
             return 10
         except:
             return 0
+
+    def analyze_volume_trend(self, coin):
+        """v6.3: 거래량 추세 (증가/유지/감소) — 보유 중 탈출 판단용"""
+        try:
+            ticker = f"KRW-{coin}"
+            ohlcv = pyupbit.get_ohlcv(ticker, interval="minute3", count=5)
+            if ohlcv is None or len(ohlcv) < 4:
+                return "unknown", 0
+
+            vols = list(ohlcv['volume'])
+            closes = list(ohlcv['close'])
+
+            # 최근 3봉 거래량 추세
+            recent_avg = np.mean(vols[-2:])
+            prev_avg = np.mean(vols[:-2])
+            vol_ratio = recent_avg / prev_avg if prev_avg > 0 else 1
+
+            # 가격+거래량 동시 판단
+            price_up = closes[-1] > closes[-3]
+            vol_up = vol_ratio >= 1.2
+
+            if vol_up and price_up:
+                return "strong", vol_ratio      # 거래량↑ + 가격↑ = 강함
+            elif vol_up and not price_up:
+                return "selling", vol_ratio     # 거래량↑ + 가격↓ = 매도세
+            elif not vol_up and price_up:
+                return "weak_up", vol_ratio     # 거래량↓ + 가격↑ = 약한 상승
+            elif vol_ratio < 0.3:
+                return "dead", vol_ratio        # 거래량 소멸
+            else:
+                return "fading", vol_ratio      # 거래량↓ + 가격↓/횡보
+        except:
+            return "unknown", 0
     
     def analyze_rsi(self, coin):
         """RSI 분석 (0~100점) - v4.3: 추세 방향에 따라 해석 변경"""
@@ -5370,42 +5403,56 @@ class TradingBotV3:
                     if hasattr(self, '_mini_trail_peaks') and mini_trail_key in self._mini_trail_peaks:
                         del self._mini_trail_peaks[mini_trail_key]
 
-                # === v6.2: 거래량/모멘텀 기반 탈출 (시간 제한 제거) ===
-                # 원칙: 거래량+모멘텀 살아있으면 시간 무관 홀딩, 둘 다 죽으면 탈출
+                # === v6.3: 5분봉 거래량 추세 기반 탈출 ===
+                # 원칙: 에너지(거래량+방향) 기반 판단, 소액 손실은 회복 대기
                 _vol_now = 0
+                _vol_trend = "unknown"
+                _vol_ratio = 0
                 try:
                     _vol_now = self.analyze_volume(coin)
+                    _vol_trend, _vol_ratio = self.analyze_volume_trend(coin)
                 except:
                     pass
-                _vol_alive = _vol_now >= 30
                 _mom_alive = momentum >= 20 or uptrend
 
-                # 1. 수익 중 + 에너지 살아있음 → 무제한 홀딩 (트레일링이 보호)
-                if profit_rate >= 0.003 and (_vol_alive or _mom_alive):
+                # 1. 소액 손실(-0.3% 이내) → 탈출 금지, 회복 대기
+                # 데이터: 소액 손실 후 22:1 비율로 회복
+                if -0.003 <= profit_rate < 0 and _vol_trend not in ("dead", "selling"):
                     if int(minutes_held) % 10 == 0 and minutes_held >= 10:
-                        print(f"  💎 {coin} {batch_id} 홀딩 ({profit_rate*100:+.2f}%, {minutes_held:.0f}분, 거래량{_vol_now}, 모멘텀{momentum:.0f})")
+                        print(f"  ⏳ {coin} {batch_id} 소액손실 회복대기 ({profit_rate*100:+.2f}%, {minutes_held:.0f}분, 추세={_vol_trend})")
                     continue
 
-                # 2. 거래량+모멘텀 동시 하락 + 10분 이상 → 탈출
-                if not _vol_alive and not _mom_alive and minutes_held >= 10:
-                    if profit_rate < 0.003:
-                        print(f"📉 {coin} {batch_id} 에너지 소멸 (거래량{_vol_now}점, 모멘텀{momentum:.0f}점) → 탈출 ({profit_rate*100:+.2f}%, {minutes_held:.0f}분)")
-                        self.place_sell_order(coin, batch_id)
-                        self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': profit_rate < 0, 'exit_price': price}
-                        continue
+                # 2. 무승부(±0.1%) → 탈출 금지 (수수료만 날림)
+                if abs(profit_rate) < 0.001 and _vol_trend not in ("dead",):
+                    if int(minutes_held) % 10 == 0 and minutes_held >= 10:
+                        print(f"  ⏳ {coin} {batch_id} 무승부 대기 ({profit_rate*100:+.2f}%, {minutes_held:.0f}분, 거래량={_vol_trend})")
+                    continue
 
-                # 3. 거래량 완전 소멸 (10점 미만) → 유동성 위험, 강제 탈출
-                if _vol_now < 10 and minutes_held >= 15:
-                    print(f"🚨 {coin} {batch_id} 거래량 소멸({_vol_now}점) → 강제 탈출 ({profit_rate*100:+.2f}%, {minutes_held:.0f}분)")
+                # 3. 수익 중 + 에너지 살아있음 → 무제한 홀딩 (트레일링이 보호)
+                if profit_rate >= 0.003 and (_vol_now >= 30 or _mom_alive):
+                    if int(minutes_held) % 10 == 0 and minutes_held >= 10:
+                        print(f"  💎 {coin} {batch_id} 홀딩 ({profit_rate*100:+.2f}%, {minutes_held:.0f}분, 추세={_vol_trend}, 모멘텀{momentum:.0f})")
+                    continue
+
+                # 4. 거래량 추세 "dead"(소멸) or "selling"(매도세) → 탈출
+                if _vol_trend in ("dead", "selling") and minutes_held >= 10:
+                    print(f"📉 {coin} {batch_id} 거래량 {_vol_trend} (비율{_vol_ratio:.2f}) → 탈출 ({profit_rate*100:+.2f}%, {minutes_held:.0f}분)")
                     self.place_sell_order(coin, batch_id)
                     self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': profit_rate < 0, 'exit_price': price}
                     continue
 
-                # 4. 횡보 + 거래량 살아있음 → 더 좋은 코인 있으면 스왑
-                if abs(profit_rate) < 0.005 and minutes_held >= 30 and not _mom_alive:
+                # 5. 거래량+모멘텀 동시 약화 ("fading") + 손실 중 → 탈출
+                if _vol_trend == "fading" and not _mom_alive and profit_rate < -0.003 and minutes_held >= 15:
+                    print(f"📉 {coin} {batch_id} 에너지 약화 (추세={_vol_trend}, 모멘텀{momentum:.0f}점) → 탈출 ({profit_rate*100:+.2f}%, {minutes_held:.0f}분)")
+                    self.place_sell_order(coin, batch_id)
+                    self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': True, 'exit_price': price}
+                    continue
+
+                # 6. 횡보 30분+ 거래량 fading → 더 좋은 코인으로 스왑
+                if abs(profit_rate) < 0.005 and minutes_held >= 30 and _vol_trend in ("fading", "dead"):
                     better = self._find_better_coin(coin, momentum)
                     if better and better[0] not in self.positions:
-                        print(f"🔄 {coin} {batch_id} 횡보 {minutes_held:.0f}분 ({profit_rate*100:+.2f}%) → {better[0]}({better[1]}점)으로 교체")
+                        print(f"🔄 {coin} {batch_id} 횡보+거래량↓ {minutes_held:.0f}분 → {better[0]}({better[1]}점)으로 교체")
                         sold = self.place_sell_order(coin, batch_id)
                         if sold:
                             time.sleep(2)
