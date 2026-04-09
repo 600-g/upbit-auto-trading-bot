@@ -157,6 +157,7 @@ class TradingBotV3:
         self._daily_reset_date = None  # 마지막 리셋 날짜
         self._max_daily_coin_buys = 2  # v5.2: 같은 코인 하루 최대 2회 (재진입 손실 방지)
         self._daily_coin_losses = {}   # v5.24: {coin: loss_count} 당일 패배 카운터
+        self._coin_loss_history = {}   # v6.4: {coin: [(date, loss_count)]} 3일 블랙리스트
         self._max_batch = 4            # 추가매수 최대 batch_4까지
 
         # v4.4: 자동 학습 시스템 (Auto-Tune)
@@ -3236,11 +3237,25 @@ class TradingBotV3:
                 self._daily_coin_losses = {}
                 self._daily_reset_date = today
 
-            # v5.24: 당일 1패 코인 재진입 금지 (CFG -306k, ANKR -120k 반복진입 방지)
+            # v6.4: 3일 블랙리스트 — 패배 코인은 3일간 재진입 금지
+            # 데이터: MMT 5건/4일 -12.6만, ORBS 5건/3일 -6.2만 (다음날 재진입 → 또 손실)
             _bt_max_re = getattr(self, '_bt_max_reentry', 1)
             if self._daily_coin_losses.get(coin, 0) >= _bt_max_re:
-                print(f"🚫 {coin} 매수 차단: 오늘 이미 {self._daily_coin_losses[coin]}패 (1패 시 당일 차단)")
+                print(f"🚫 {coin} 매수 차단: 오늘 {self._daily_coin_losses[coin]}패")
                 return False
+            # 3일 이내 패배 이력 확인
+            try:
+                with self._db_lock:
+                    cursor = self.db.execute(
+                        "SELECT COUNT(*) FROM trades WHERE coin=? AND action='sell' AND profit<0 AND timestamp>=datetime('now','-3 days')",
+                        (coin,)
+                    )
+                    recent_losses = cursor.fetchone()[0]
+                if recent_losses >= 2:
+                    print(f"🚫 {coin} 매수 차단: 3일내 {recent_losses}패 (블랙리스트)")
+                    return False
+            except:
+                pass
 
             # v4.3: 같은 코인 하루 2회 초과 매수 차단
             daily_count = self._daily_coin_buys.get(coin, 0)
@@ -3795,6 +3810,15 @@ class TradingBotV3:
             if available < 10000:
                 print("💸 가용 금액 부족 → 매수 중단")
                 break
+
+            # v6.4: 진입 시 거래량 추세 확인 (횡보 코인 진입 방지)
+            try:
+                _entry_trend, _entry_ratio = self.analyze_volume_trend(coin)
+                if _entry_trend in ("dead", "fading"):
+                    print(f"📉 {coin} 거래량 {_entry_trend}(비율{_entry_ratio:.2f}) → 진입 스킵")
+                    continue
+            except:
+                pass
 
             # 극단 변동 체크
             volatility = self.check_extreme_volatility(coin)
