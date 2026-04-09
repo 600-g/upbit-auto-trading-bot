@@ -240,7 +240,8 @@ class DebateAgent:
         ind_str = f"""RSI: {indicators.get('rsi', '?')}
 거래량 점수: {indicators.get('volume_score', '?')}
 모멘텀: {indicators.get('momentum', '?')}점
-시장 상태: {indicators.get('market_state', '보통')}"""
+시장 상태: {indicators.get('market_state', '보통')}
+{indicators.get('coin_record', '')}"""
 
         lesson_str = ""
         if lessons:
