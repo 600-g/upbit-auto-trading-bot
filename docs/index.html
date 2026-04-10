@@ -92,6 +92,9 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 .chat-bar button { background: #238636; border: none; color: #fff; width: 36px; height: 36px; border-radius: 50%; font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
 .chat-bar button:active { background: #2ea043; }
 .chat-bar button.cancel { background: #da3633; }
+.quick-cmds { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+.quick-cmds button { background: #1c2028; border: 1px solid #30363d; color: #8b949e; padding: 4px 10px; border-radius: 14px; font-size: 11px; cursor: pointer; white-space: nowrap; transition: all .15s; }
+.quick-cmds button:active { background: #238636; color: #fff; border-color: #238636; }
 .ws-status { font-size: 10px; display: flex; align-items: center; gap: 4px; margin-bottom: 6px; }
 .ws-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
 .ws-dot.on { background: #3fb950; }
@@ -194,6 +197,9 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
     <div class="ws-status" id="wsStatus"><span class="ws-dot off"></span> 연결 안 됨</div>
     <div id="chatArea">
       <div class="chat-log" id="chatLog"></div>
+      <div class="quick-cmds">
+        <button onclick="quickCmd('오늘 승패 분석해줘. 승률, 평균수익/손실, 가장 큰 수익/손실 코인, 개선점 알려줘')">📊 승패 분석</button>
+      </div>
       <div class="chat-bar">
         <input id="chatMsg" placeholder="메시지 입력..." onkeydown="if(event.key==='Enter')sendChat()">
         <button id="chatSendBtn" onclick="sendChat()">↑</button>
@@ -863,6 +869,11 @@ function updateSendBtn() {
     btn.className = '';
     btn.onclick = sendChat;
   }
+}
+
+function quickCmd(prompt) {
+  document.getElementById('chatMsg').value = prompt;
+  sendChat();
 }
 
 function sendChat() {
