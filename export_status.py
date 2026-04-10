@@ -276,6 +276,62 @@ def export():
     except:
         pass
 
+    # AI 교훈 통계
+    ai_stats = {'total_lessons': 0, 'mistakes': [], 'avg_severity': 0}
+    try:
+        c.execute('SELECT COUNT(*), AVG(severity) FROM trade_reflections')
+        row = c.fetchone()
+        ai_stats['total_lessons'] = row[0] or 0
+        ai_stats['avg_severity'] = round(row[1] or 0, 1)
+        c.execute('SELECT mistake_type, COUNT(*) FROM trade_reflections WHERE mistake_type != "none" GROUP BY mistake_type ORDER BY COUNT(*) DESC')
+        ai_stats['mistakes'] = [{'type': r[0], 'count': r[1]} for r in c.fetchall()]
+    except:
+        pass
+
+    # 평균 수익/손실 (R:R 비율)
+    rr_stats = {'avg_win': 0, 'avg_loss': 0, 'rr_ratio': 0, 'biggest_win': 0, 'biggest_loss': 0}
+    try:
+        c.execute('SELECT AVG(profit), MAX(profit) FROM trades WHERE action="sell" AND profit > 0')
+        row = c.fetchone()
+        rr_stats['avg_win'] = round(row[0] or 0)
+        rr_stats['biggest_win'] = round(row[1] or 0)
+        c.execute('SELECT AVG(profit), MIN(profit) FROM trades WHERE action="sell" AND profit < 0')
+        row = c.fetchone()
+        rr_stats['avg_loss'] = round(row[0] or 0)
+        rr_stats['biggest_loss'] = round(row[1] or 0)
+        if rr_stats['avg_loss'] != 0:
+            rr_stats['rr_ratio'] = round(abs(rr_stats['avg_win'] / rr_stats['avg_loss']), 2)
+    except:
+        pass
+
+    # 누적 수익 곡선 (일별 누적)
+    equity_curve = []
+    try:
+        cumulative = 0
+        for d_item in daily:
+            cumulative += d_item['pnl']
+            equity_curve.append({'date': d_item['date'], 'equity': round(cumulative)})
+    except:
+        pass
+
+    # AI 최근 판단 로그 (로그 파일 파싱)
+    ai_decisions = []
+    try:
+        import re as re2
+        log_path = os.path.join(BASE_DIR, 'logs', 'bot_output.log')
+        if os.path.exists(log_path):
+            with open(log_path, 'rb') as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 30000))
+                tail = f.read().decode('utf-8', errors='ignore')
+            # AI 매수/매도 판단 파싱
+            for m in re2.finditer(r'🤖 \[AI[^\]]*\] (\w+) (매수 허용|매수 차단|매도 추천|홀딩 추천|홀딩 연장)[^\n]*\(([^)]+)\)', tail):
+                ai_decisions.append({'coin': m.group(1), 'action': m.group(2), 'reason': m.group(3)[:60]})
+            ai_decisions = ai_decisions[-10:]  # 최근 10개만
+    except:
+        pass
+
     # 시간대별 승률/손익
     hourly = []
     try:
@@ -322,7 +378,11 @@ def export():
         'bot_mode': bot_mode,
         'momentum': momentum_info,
         'market': market,
-        'version': '1.2.0',
+        'ai_stats': ai_stats,
+        'rr_stats': rr_stats,
+        'equity_curve': equity_curve,
+        'ai_decisions': ai_decisions,
+        'version': '1.2.1',
         'updated': datetime.now().strftime('%m/%d %H:%M:%S')
     }
 

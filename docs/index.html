@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>🚀 업비트 자동매매 봇 v1.2.0</title>
+<title>🚀 업비트 자동매매 봇 v1.2.1</title>
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -118,13 +118,61 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 .mom-bar-row .threshold-line { position: absolute; top: 0; height: 100%; width: 2px; background: #f0c040; z-index: 1; }
 .mom-stats { display: flex; justify-content: space-between; margin-top: 8px; font-size: 10px; color: #484f58; }
 .mom-stats .val { color: #8b949e; font-weight: 600; }
+/* v1.2.1: 일 목표 프로그레스 */
+.goal-bar { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+.goal-bar .title { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.goal-bar .title .lb { font-size: 12px; color: #58a6ff; font-weight: 600; }
+.goal-bar .title .pct { font-size: 20px; font-weight: 700; }
+.goal-track { height: 20px; background: #1c2028; border-radius: 10px; overflow: hidden; position: relative; }
+.goal-track .fill { height: 100%; border-radius: 10px; transition: width .5s; position: relative; }
+.goal-track .fill.positive { background: linear-gradient(90deg, #238636, #3fb950); }
+.goal-track .fill.negative { background: linear-gradient(90deg, #da3633, #f85149); }
+.goal-track .mark { position: absolute; top: 0; height: 100%; width: 2px; background: #f0c040; z-index: 1; }
+.goal-sub { display: flex; justify-content: space-between; margin-top: 6px; font-size: 10px; color: #484f58; }
+/* R:R 비율 카드 */
+.rr-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+.rr-card h3 { font-size: 12px; color: #58a6ff; margin-bottom: 8px; }
+.rr-bars { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.rr-bars .label { font-size: 11px; min-width: 50px; }
+.rr-bars .track { flex: 1; height: 16px; background: #1c2028; border-radius: 4px; overflow: hidden; }
+.rr-bars .fill-w { height: 100%; background: #da3633; border-radius: 4px; }
+.rr-bars .fill-l { height: 100%; background: #3b82f6; border-radius: 4px; }
+.rr-bars .val { font-size: 12px; font-weight: 700; min-width: 65px; text-align: right; }
+.rr-ratio { text-align: center; font-size: 14px; font-weight: 700; margin-top: 4px; padding: 6px; background: #1c2028; border-radius: 6px; }
+/* 누적 수익 그래프 */
+.equity-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+.equity-card h3 { font-size: 12px; color: #58a6ff; margin-bottom: 8px; }
+.equity-svg { width: 100%; height: 120px; }
+/* AI 판단 피드 */
+.ai-feed { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+.ai-feed h3 { font-size: 12px; color: #58a6ff; margin-bottom: 8px; cursor: pointer; }
+.ai-feed h3::after { content: ' ▾'; font-size: 10px; }
+.ai-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid #1c2028; font-size: 11px; }
+.ai-item:last-child { border-bottom: none; }
+.ai-item .coin { font-weight: 700; min-width: 44px; }
+.ai-item .act { font-size: 10px; padding: 1px 5px; border-radius: 3px; font-weight: 600; white-space: nowrap; }
+.ai-item .act.allow { background: #23863622; color: #3fb950; }
+.ai-item .act.block { background: #da363322; color: #f85149; }
+.ai-item .act.hold { background: #1f6feb22; color: #58a6ff; }
+.ai-item .rsn { color: #8b949e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+/* AI 교훈 카드 */
+.lesson-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+.lesson-card h3 { font-size: 12px; color: #58a6ff; margin-bottom: 8px; }
+.lesson-pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; margin: 2px 3px; }
+.lesson-pill.early_exit { background: #f8514922; color: #f85149; }
+.lesson-pill.timing { background: #f0c04022; color: #f0c040; }
+.lesson-pill.overchase { background: #d2a8ff22; color: #d2a8ff; }
+.lesson-pill.ignore_trend { background: #3b82f622; color: #3b82f6; }
+/* 포지션 미니 게이지 */
+.pos-gauge { width: 60px; height: 8px; background: #1c2028; border-radius: 4px; overflow: hidden; margin-top: 4px; }
+.pos-gauge .gf { height: 100%; border-radius: 4px; }
 </style>
 <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
 </head>
 <body>
 <div class="hdr">
-  <h1><span class="dot" id="dot"></span>🚀 업비트 자동매매 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.2.0</span></h1>
+  <h1><span class="dot" id="dot"></span>🚀 업비트 자동매매 봇 <span id="ver" style="font-size:11px;color:#484f58;font-weight:400;cursor:pointer;padding:4px 8px;border-radius:4px;-webkit-tap-highlight-color:transparent">v1.2.1</span></h1>
   <div><span class="tm" id="tm"></span> <span class="menu-btn" onclick="toggleMenu()">☰</span></div>
 </div>
 <div id="overlay" class="overlay" onclick="toggleMenu()"></div>
@@ -201,6 +249,28 @@ function render(d) {
     </div>`;
   }
 
+  // 일 목표 프로그레스 (5% = 50만원)
+  const goalAmt = 500000;
+  const todayPnl = d.today_pnl || 0;
+  const goalPct = Math.min(Math.max(todayPnl / goalAmt * 100, -100), 150);
+  const goalColor = todayPnl >= 0 ? 'positive' : 'negative';
+  const goalFillW = Math.min(Math.abs(goalPct), 100);
+  html += `<div class="goal-bar">
+    <div class="title">
+      <span class="lb">오늘 목표 5% (${fmt(goalAmt)}원)</span>
+      <span class="pct ${pc(todayPnl)}">${goalPct >= 0 ? '+' : ''}${goalPct.toFixed(1)}%</span>
+    </div>
+    <div class="goal-track">
+      <div class="mark" style="left:100%"></div>
+      <div class="fill ${goalColor}" style="width:${goalFillW}%"></div>
+    </div>
+    <div class="goal-sub">
+      <span>현재 ${ps(Math.round(todayPnl))}원</span>
+      <span>남은 ${ps(Math.round(goalAmt - todayPnl))}원</span>
+      <span>${d.today_trades || 0}건 거래</span>
+    </div>
+  </div>`;
+
   // Momentum gauge
   const mom = d.momentum || {};
   if (mom.top10 && mom.top10.length > 0) {
@@ -254,6 +324,91 @@ function render(d) {
     </div>
   </div>`;
 
+  // R:R 비율 카드
+  const rr = d.rr_stats || {};
+  if (rr.avg_win || rr.avg_loss) {
+    const maxRR = Math.max(Math.abs(rr.avg_win), Math.abs(rr.avg_loss), 1);
+    const rrColor = rr.rr_ratio >= 2 ? '#3fb950' : rr.rr_ratio >= 1.5 ? '#f0c040' : '#f85149';
+    html += `<div class="rr-card"><h3>수익/손실 비율 (R:R)</h3>
+      <div class="rr-bars">
+        <span class="label p">평균 수익</span>
+        <div class="track"><div class="fill-w" style="width:${Math.abs(rr.avg_win)/maxRR*100}%"></div></div>
+        <span class="val p">${ps(rr.avg_win)}원</span>
+      </div>
+      <div class="rr-bars">
+        <span class="label m">평균 손실</span>
+        <div class="track"><div class="fill-l" style="width:${Math.abs(rr.avg_loss)/maxRR*100}%"></div></div>
+        <span class="val m">${fmt(rr.avg_loss)}원</span>
+      </div>
+      <div class="rr-ratio" style="color:${rrColor}">R:R = ${rr.rr_ratio || '—'}
+        <span style="font-size:10px;color:#484f58;font-weight:400;margin-left:8px">(목표: 2.0 이상)</span>
+      </div>
+    </div>`;
+  }
+
+  // 누적 수익 곡선
+  const eq = d.equity_curve || [];
+  if (eq.length >= 2) {
+    const eqMin = Math.min(...eq.map(e => e.equity));
+    const eqMax = Math.max(...eq.map(e => e.equity));
+    const eqRange = eqMax - eqMin || 1;
+    const svgW = 100;
+    const svgH = 100;
+    const pad = 5;
+    const points = eq.map((e, i) => {
+      const x = pad + (i / (eq.length - 1)) * (svgW - pad * 2);
+      const y = svgH - pad - ((e.equity - eqMin) / eqRange) * (svgH - pad * 2);
+      return `${x},${y}`;
+    }).join(' ');
+    const lastEq = eq[eq.length - 1].equity;
+    const lineColor = lastEq >= 0 ? '#3fb950' : '#f85149';
+    const fillColor = lastEq >= 0 ? '#3fb95015' : '#f8514915';
+    const zeroY = svgH - pad - ((0 - eqMin) / eqRange) * (svgH - pad * 2);
+    const areaPoints = `${pad},${zeroY} ` + points + ` ${svgW - pad},${zeroY}`;
+    html += `<div class="equity-card"><h3>누적 수익 곡선</h3>
+      <svg class="equity-svg" viewBox="0 0 ${svgW} ${svgH}" preserveAspectRatio="none">
+        <line x1="${pad}" y1="${zeroY}" x2="${svgW-pad}" y2="${zeroY}" stroke="#30363d" stroke-width="0.5" stroke-dasharray="2"/>
+        <polygon points="${areaPoints}" fill="${fillColor}"/>
+        <polyline points="${points}" fill="none" stroke="${lineColor}" stroke-width="1.5" stroke-linejoin="round"/>
+        <circle cx="${points.split(' ').pop().split(',')[0]}" cy="${points.split(' ').pop().split(',')[1]}" r="2" fill="${lineColor}"/>
+      </svg>
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:#484f58;margin-top:4px">
+        <span>${eq[0].date.slice(5)}</span>
+        <span class="${pc(lastEq)}">누적 ${ps(lastEq)}원</span>
+        <span>${eq[eq.length-1].date.slice(5)}</span>
+      </div>
+    </div>`;
+  }
+
+  // AI 판단 피드
+  const aiD = d.ai_decisions || [];
+  if (aiD.length > 0) {
+    html += `<div class="ai-feed"><h3 onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">AI 판단 로그</h3><div>`;
+    aiD.forEach(a => {
+      let cls = 'hold';
+      if (a.action.includes('허용')) cls = 'allow';
+      else if (a.action.includes('차단') || a.action.includes('매도')) cls = 'block';
+      html += `<div class="ai-item">
+        <span class="coin">${a.coin}</span>
+        <span class="act ${cls}">${a.action}</span>
+        <span class="rsn">${a.reason}</span>
+      </div>`;
+    });
+    html += '</div></div>';
+  }
+
+  // AI 교훈 카드
+  const aiS = d.ai_stats || {};
+  if (aiS.total_lessons > 0 && aiS.mistakes && aiS.mistakes.length > 0) {
+    const typeNames = {'early_exit':'조기익절','timing':'타이밍','overchase':'추격매수','ignore_trend':'추세무시'};
+    html += `<div class="lesson-card"><h3>AI 교훈 요약 <span style="font-size:10px;color:#484f58;font-weight:400">(${aiS.total_lessons}건, 심각도 ${aiS.avg_severity})</span></h3>`;
+    aiS.mistakes.forEach(m => {
+      const name = typeNames[m.type] || m.type;
+      html += `<span class="lesson-pill ${m.type}">${name} ${m.count}건</span>`;
+    });
+    html += '</div>';
+  }
+
   // Positions
   const bn = {'batch_1':'1차','batch_2':'2차','batch_3':'3차','surge_trade':'급등','idle_trade':'중타'};
   if (d.positions && d.positions.length > 0) {
@@ -267,10 +422,13 @@ function render(d) {
       const curAmt = p.cur_amount ? fmt(p.cur_amount) : fmt(p.amount);
       const pnlAmt = p.cur_amount ? p.cur_amount - p.amount : 0;
       const batchCls = p.batch==='surge_trade'?'ts':p.batch==='idle_trade'?'td':'tb';
+      const gaugeW = Math.min(Math.abs(p.profit_rate) * 10, 100);
+      const gaugeC = p.profit_rate >= 0 ? '#da3633' : '#3b82f6';
       html += `<div class="pos">
-        <div><div class="cn">${p.coin} <span class="tg ${batchCls}">${bn[p.batch]||p.batch}</span></div>
+        <div style="flex:1"><div class="cn">${p.coin} <span class="tg ${batchCls}">${bn[p.batch]||p.batch}</span></div>
         <div class="dt">${fmt(p.amount)}원 → ${curAmt}원 <span class="${pc(pnlAmt)}">(${ps(Math.round(pnlAmt))})</span> · ${holdTxt}</div>
-        <div class="dt">매수 ${buyPrice} → 현재 ${curPrice}</div></div>
+        <div class="dt">매수 ${buyPrice} → 현재 ${curPrice}</div>
+        <div class="pos-gauge"><div class="gf" style="width:${gaugeW}%;background:${gaugeC}"></div></div></div>
         <div class="pr ${pc(p.profit_rate)}">${p.profit_rate>=0?'+':''}${p.profit_rate.toFixed(2)}%</div>
       </div>`;
     });
