@@ -80,9 +80,10 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 .chat-wrap { border-top: 1px solid #30363d; margin-top: 16px; padding-top: 12px; display: flex; flex-direction: column; flex: 1; }
 .chat-wrap h3 { margin-bottom: 8px; }
 .chat-log { flex: 1; overflow-y: auto; max-height: 300px; padding: 4px 0; }
-.bubble { max-width: 85%; padding: 8px 12px; border-radius: 12px; font-size: 12px; line-height: 1.4; margin-bottom: 6px; word-break: break-word; }
+.bubble { max-width: 85%; padding: 8px 12px; border-radius: 12px; font-size: 12px; line-height: 1.4; margin-bottom: 6px; word-break: break-word; white-space: pre-wrap; }
 .bubble.me { background: #238636; color: #fff; margin-left: auto; border-bottom-right-radius: 4px; }
 .bubble.bot { background: #30363d; color: #c9d1d9; margin-right: auto; border-bottom-left-radius: 4px; }
+.bubble.streaming { border: 1px solid #58a6ff33; }
 .bubble .btime { font-size: 9px; opacity: .5; margin-top: 3px; }
 .bubble .bstatus { font-size: 9px; opacity: .6; margin-top: 2px; }
 .chat-bar { display: flex; gap: 6px; margin-top: 8px; }
@@ -90,9 +91,21 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 .chat-bar input:focus { border-color: #58a6ff; }
 .chat-bar button { background: #238636; border: none; color: #fff; width: 36px; height: 36px; border-radius: 50%; font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
 .chat-bar button:active { background: #2ea043; }
-.chat-setup { font-size: 11px; color: #484f58; margin-top: 8px; }
-.chat-setup input { width: 100%; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 6px 8px; color: #c9d1d9; font-size: 11px; margin-top: 4px; outline: none; }
-.chat-setup button { background: #30363d; border: none; color: #c9d1d9; padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-top: 4px; }
+.chat-bar button.cancel { background: #da3633; }
+.team-select { display: flex; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; }
+.team-select .chip { padding: 3px 8px; border-radius: 12px; font-size: 11px; cursor: pointer; background: #1c2028; color: #8b949e; border: 1px solid #30363d; transition: all .2s; }
+.team-select .chip.active { background: #1f6feb22; color: #58a6ff; border-color: #58a6ff; }
+.ws-status { font-size: 10px; display: flex; align-items: center; gap: 4px; margin-bottom: 6px; }
+.ws-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.ws-dot.on { background: #3fb950; }
+.ws-dot.off { background: #f85149; }
+.ws-dot.connecting { background: #f0c040; animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: .3; } }
+.thinking { display: flex; align-items: center; gap: 4px; padding: 8px 12px; }
+.thinking .dot { width: 6px; height: 6px; background: #58a6ff; border-radius: 50%; animation: bounce .6s infinite alternate; }
+.thinking .dot:nth-child(2) { animation-delay: .2s; }
+.thinking .dot:nth-child(3) { animation-delay: .4s; }
+@keyframes bounce { to { opacity: .3; transform: translateY(-4px); } }
 .mkt { display: flex; align-items: center; gap: 10px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
 .mkt .badge { font-size: 13px; font-weight: 700; padding: 3px 10px; border-radius: 6px; }
 .mkt .info { flex: 1; font-size: 11px; color: #8b949e; }
@@ -167,8 +180,7 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 .pos-gauge { width: 60px; height: 8px; background: #1c2028; border-radius: 4px; overflow: hidden; margin-top: 4px; }
 .pos-gauge .gf { height: 100%; border-radius: 4px; }
 </style>
-<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+<!-- WebSocket 직통 채팅 (Firebase 제거) -->
 </head>
 <body>
 <div class="hdr">
@@ -181,20 +193,15 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
   <h3>AutoTune 개선 로그</h3>
   <div id="logList"></div>
   <div class="chat-wrap">
-    <h3>💬 채팅</h3>
+    <h3>💬 에이전트 채팅</h3>
+    <div class="team-select" id="teamChips"></div>
+    <div class="ws-status" id="wsStatus"><span class="ws-dot off"></span> 연결 안 됨</div>
     <div id="chatArea">
       <div class="chat-log" id="chatLog"></div>
       <div class="chat-bar">
         <input id="chatMsg" placeholder="메시지 입력..." onkeydown="if(event.key==='Enter')sendChat()">
-        <button onclick="sendChat()">↑</button>
+        <button id="chatSendBtn" onclick="sendChat()">↑</button>
       </div>
-    </div>
-    <div id="chatSetup" style="display:none" class="chat-setup">
-      <div>텔레그램 봇 토큰</div>
-      <input id="tgToken" placeholder="123456:ABC...">
-      <div style="margin-top:4px">Chat ID</div>
-      <input id="tgChatId" placeholder="8440882806">
-      <button onclick="saveTgConfig()" style="margin-top:6px">저장</button>
     </div>
   </div>
 </div>
@@ -723,102 +730,202 @@ function showToast(msg, type) {
   setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 300); }, 3000);
 }
 
-// Firebase 채팅 (실시간)
-const fbApp = firebase.initializeApp({
-  apiKey: "AIzaSyAF6096bC-Q04qWXh5MjVsuJGhYBy76agM",
-  authDomain: "datemap-759bf.firebaseapp.com",
-  projectId: "datemap-759bf",
-  storageBucket: "datemap-759bf.firebasestorage.app",
-  messagingSenderId: "833273999923",
-  appId: "1:833273999923:web:2696d0363c223c6bbbe946"
-});
-const db = firebase.firestore();
-const chatRef = db.collection('upbit_chat');
+// ── 에이전트 채팅 (WebSocket 직통) ──────────────────────
+const WS_BASE = 'wss://api.600g.net/ws/chat/';
+const WS_FALLBACK = 'ws://localhost:8000/ws/chat/';
+const AGENT_TEAMS = [
+  { id: 'trading-bot', name: '매매봇', emoji: '🤖' },
+  { id: 'cpo-claude', name: 'CPO', emoji: '🧠' },
+  { id: 'date-map', name: '데이트지도', emoji: '🗺️' },
+];
+let wsConn = null;
+let wsTeamId = 'trading-bot';
+let wsStreaming = false;
+let wsStreamBubble = null;
+let wsMessages = {}; // teamId -> [{type, content}]
 
-// 텔레그램 설정 (하드코딩 — 개인 도구)
-const TG_CFG = { token: '8481220569:AAHVSypL0kUN21ehhxG0uKGCz3PpIXkdm28', chatId: '8440882806' };
-function getTgConfig() {
-  // localStorage 우선, 없으면 하드코딩 기본값
-  const token = localStorage.getItem('tg_token') || TG_CFG.token;
-  const chatId = localStorage.getItem('tg_chat_id') || TG_CFG.chatId;
-  return { token, chatId };
+function initChat() {
+  // 팀 칩 렌더링
+  const chips = document.getElementById('teamChips');
+  chips.innerHTML = AGENT_TEAMS.map(t =>
+    `<span class="chip ${t.id === wsTeamId ? 'active' : ''}" onclick="switchTeam('${t.id}')">${t.emoji} ${t.name}</span>`
+  ).join('');
+  connectWS();
 }
 
-function renderChat(messages) {
+function switchTeam(teamId) {
+  if (wsStreaming) { showToast('응답 중에는 전환 불가', 'warn'); return; }
+  if (wsConn) { wsConn.close(); wsConn = null; }
+  wsTeamId = teamId;
+  // 칩 active 업데이트
+  document.querySelectorAll('.team-select .chip').forEach(c => {
+    c.classList.toggle('active', c.textContent.includes(AGENT_TEAMS.find(t=>t.id===teamId)?.name));
+  });
+  renderChatLog();
+  connectWS();
+}
+
+function setWsStatus(state) {
+  const el = document.getElementById('wsStatus');
+  const team = AGENT_TEAMS.find(t => t.id === wsTeamId);
+  if (state === 'on') el.innerHTML = `<span class="ws-dot on"></span> ${team?.emoji} ${team?.name} 연결됨`;
+  else if (state === 'connecting') el.innerHTML = `<span class="ws-dot connecting"></span> 연결 중...`;
+  else el.innerHTML = `<span class="ws-dot off"></span> 연결 안 됨`;
+}
+
+function connectWS() {
+  setWsStatus('connecting');
+  // 먼저 외부 URL 시도, 실패하면 localhost fallback
+  _tryConnect(WS_BASE + wsTeamId, () => {
+    _tryConnect(WS_FALLBACK + wsTeamId, () => {
+      setWsStatus('off');
+      showToast('서버 연결 실패 — company-hq 서버 확인', 'err');
+    });
+  });
+}
+
+function _tryConnect(url, onFail) {
+  const ws = new WebSocket(url);
+  const timeout = setTimeout(() => { ws.close(); onFail(); }, 5000);
+  ws.onopen = () => {
+    clearTimeout(timeout);
+    wsConn = ws;
+    setWsStatus('on');
+  };
+  ws.onmessage = (e) => {
+    try { handleWsMessage(JSON.parse(e.data)); } catch {}
+  };
+  ws.onerror = () => { clearTimeout(timeout); };
+  ws.onclose = () => {
+    if (wsConn === ws) { wsConn = null; setWsStatus('off'); }
+  };
+}
+
+function handleWsMessage(data) {
   const log = document.getElementById('chatLog');
-  if (!messages || messages.length === 0) {
-    log.innerHTML = '<div style="text-align:center;color:#484f58;font-size:11px;padding:20px 0">메시지를 보내보세요</div>';
+  if (data.type === 'history_sync') {
+    // 서버에서 과거 대화 수신
+    wsMessages[wsTeamId] = (data.messages || []).map(m => ({
+      type: m.type === 'user' ? 'me' : 'bot',
+      content: m.content || '',
+      cancelled: m.cancelled || false,
+    }));
+    renderChatLog();
+  } else if (data.type === 'user') {
+    // 내 메시지 에코 (이미 로컬에 추가했으므로 무시)
+  } else if (data.type === 'ai_start') {
+    wsStreaming = true;
+    updateSendBtn();
+    // 생각 중 표시
+    log.innerHTML += '<div id="thinkingDots" class="bubble bot streaming thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
+    log.scrollTop = log.scrollHeight;
+  } else if (data.type === 'ai_chunk') {
+    // 생각 중 제거
+    const dots = document.getElementById('thinkingDots');
+    if (dots) dots.remove();
+    // 스트리밍 버블
+    if (!wsStreamBubble) {
+      const div = document.createElement('div');
+      div.className = 'bubble bot streaming';
+      div.id = 'streamBubble';
+      log.appendChild(div);
+      wsStreamBubble = div;
+    }
+    wsStreamBubble.textContent += data.content;
+    log.scrollTop = log.scrollHeight;
+  } else if (data.type === 'ai_end') {
+    const dots = document.getElementById('thinkingDots');
+    if (dots) dots.remove();
+    if (wsStreamBubble) {
+      wsStreamBubble.classList.remove('streaming');
+      wsStreamBubble.id = '';
+      // 히스토리에 추가
+      if (!wsMessages[wsTeamId]) wsMessages[wsTeamId] = [];
+      wsMessages[wsTeamId].push({ type: 'bot', content: wsStreamBubble.textContent });
+      wsStreamBubble = null;
+    }
+    wsStreaming = false;
+    updateSendBtn();
+  } else if (data.type === 'status') {
+    // 상태 표시 (도구 사용 중 등)
+    const dots = document.getElementById('thinkingDots');
+    if (dots) dots.innerHTML = `<span style="font-size:10px;color:#58a6ff">${data.content}</span>`;
+  } else if (data.type === 'ping') {
+    // keepalive 응답
+    if (wsConn) wsConn.send(JSON.stringify({ action: 'pong' }));
+  } else if (data.type === 'history_cleared') {
+    wsMessages[wsTeamId] = [];
+    renderChatLog();
+  }
+}
+
+function renderChatLog() {
+  const log = document.getElementById('chatLog');
+  const msgs = wsMessages[wsTeamId] || [];
+  if (msgs.length === 0) {
+    const team = AGENT_TEAMS.find(t => t.id === wsTeamId);
+    log.innerHTML = `<div style="text-align:center;color:#484f58;font-size:11px;padding:20px 0">${team?.emoji} ${team?.name}에게 메시지를 보내보세요<br><span style="font-size:10px">예: "현재 봇 상태 알려줘"</span></div>`;
     return;
   }
-  // ts 기준 정렬 (null은 맨 뒤로)
-  messages.sort((a, b) => {
-    const ta = a.ts ? (a.ts.seconds || 0) : (a._ts ? a._ts/1000 : 9999999999);
-    const tb = b.ts ? (b.ts.seconds || 0) : (b._ts ? b._ts/1000 : 9999999999);
-    return ta - tb;
-  });
-  log.innerHTML = messages.map((m, i) => {
+  log.innerHTML = msgs.map(m => {
     const cls = m.type === 'me' ? 'me' : 'bot';
-    let check = '';
-    if (m.type === 'me') {
-      // 내 메시지 뒤에 봇 응답이 있으면 읽음(✓✓), 전송만 됐으면 ✓
-      const hasReply = messages.slice(i + 1).some(x => x.type === 'bot');
-      check = hasReply ? ' ✓✓' : ' ✓';
-    }
-    return `<div class="bubble ${cls}">${m.text}<div class="btime">${m.time}${check}</div></div>`;
+    const cancelled = m.cancelled ? ' <span style="color:#f85149;font-size:10px">취소됨</span>' : '';
+    return `<div class="bubble ${cls}">${_escapeHtml(m.content)}${cancelled}</div>`;
   }).join('');
   log.scrollTop = log.scrollHeight;
 }
 
-// 실시간 리스너
-function initChat() {
-  // 항상 채팅 활성화 (하드코딩 기본값이 있으므로)
-  document.getElementById('chatArea').style.display = 'block';
-  document.getElementById('chatSetup').style.display = 'none';
-  chatRef.orderBy('ts').limitToLast(50).onSnapshot(snap => {
-    const msgs = [];
-    snap.forEach(doc => msgs.push(doc.data()));
-    renderChat(msgs);
-  }, err => {
-    console.warn('Firebase 채팅 오류:', err);
-    document.getElementById('chatLog').innerHTML = '<div style="text-align:center;color:#f85149;font-size:11px;padding:20px 0">채팅 연결 실패</div>';
-  });
+function _escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-function saveTgConfig() {
-  const token = document.getElementById('tgToken').value.trim();
-  const chatId = document.getElementById('tgChatId').value.trim();
-  if (!token || !chatId) return;
-  localStorage.setItem('tg_token', token);
-  localStorage.setItem('tg_chat_id', chatId);
-  document.getElementById('chatArea').style.display = 'block';
-  document.getElementById('chatSetup').style.display = 'none';
-  initChat();
+function updateSendBtn() {
+  const btn = document.getElementById('chatSendBtn');
+  if (wsStreaming) {
+    btn.textContent = '■';
+    btn.className = 'cancel';
+    btn.onclick = cancelChat;
+  } else {
+    btn.textContent = '↑';
+    btn.className = '';
+    btn.onclick = sendChat;
+  }
 }
 
-async function sendChat() {
-  const cfg = getTgConfig();
-  if (!cfg) { initChat(); return; }
+function sendChat() {
+  if (wsStreaming) return;
+  if (!wsConn || wsConn.readyState !== 1) {
+    showToast('연결 안 됨 — 재연결 중...', 'warn');
+    connectWS();
+    return;
+  }
   const input = document.getElementById('chatMsg');
   const msg = input.value.trim();
   if (!msg) return;
   input.value = '';
 
-  const now = new Date();
-  const time = `${now.getMonth()+1}/${now.getDate()} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+  // 로컬 즉시 표시
+  if (!wsMessages[wsTeamId]) wsMessages[wsTeamId] = [];
+  wsMessages[wsTeamId].push({ type: 'me', content: msg });
+  renderChatLog();
 
-  // Firebase에 저장 (즉시 표시)
-  await chatRef.add({ type: 'me', text: msg, time, ts: firebase.firestore.FieldValue.serverTimestamp(), _ts: Date.now() });
-
-  // 텔레그램으로도 전송 (봇이 처리하도록)
-  try {
-    const tgResp = await fetch(`https://api.telegram.org/bot${cfg.token}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: cfg.chatId, text: '📊 [대시보드]\n' + msg })
-    });
-    if (!tgResp.ok) showToast('텔레그램 전송 실패', 'warn');
-  } catch(e) { showToast('텔레그램 연결 실패', 'err'); }
+  // WebSocket 전송
+  wsConn.send(JSON.stringify({ prompt: msg }));
   input.focus();
+}
+
+function cancelChat() {
+  if (wsConn && wsConn.readyState === 1) {
+    wsConn.send(JSON.stringify({ action: 'cancel' }));
+  }
+  wsStreaming = false;
+  wsStreamBubble = null;
+  updateSendBtn();
+  const dots = document.getElementById('thinkingDots');
+  if (dots) dots.remove();
+  const sb = document.getElementById('streamBubble');
+  if (sb) { sb.classList.remove('streaming'); sb.id = ''; }
+  showToast('작업 취소됨', 'info');
 }
 
 initChat();
