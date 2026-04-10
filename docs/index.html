@@ -92,9 +92,6 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
 .chat-bar button { background: #238636; border: none; color: #fff; width: 36px; height: 36px; border-radius: 50%; font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
 .chat-bar button:active { background: #2ea043; }
 .chat-bar button.cancel { background: #da3633; }
-.team-select { display: flex; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; }
-.team-select .chip { padding: 3px 8px; border-radius: 12px; font-size: 11px; cursor: pointer; background: #1c2028; color: #8b949e; border: 1px solid #30363d; transition: all .2s; }
-.team-select .chip.active { background: #1f6feb22; color: #58a6ff; border-color: #58a6ff; }
 .ws-status { font-size: 10px; display: flex; align-items: center; gap: 4px; margin-bottom: 6px; }
 .ws-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
 .ws-dot.on { background: #3fb950; }
@@ -193,8 +190,7 @@ td { padding: 4px 4px; border-bottom: 1px solid #1c2028; white-space: nowrap; }
   <h3>AutoTune 개선 로그</h3>
   <div id="logList"></div>
   <div class="chat-wrap">
-    <h3>💬 에이전트 채팅</h3>
-    <div class="team-select" id="teamChips"></div>
+    <h3>💬 매매봇 채팅</h3>
     <div class="ws-status" id="wsStatus"><span class="ws-dot off"></span> 연결 안 됨</div>
     <div id="chatArea">
       <div class="chat-log" id="chatLog"></div>
@@ -733,44 +729,22 @@ function showToast(msg, type) {
 // ── 에이전트 채팅 (WebSocket 직통) ──────────────────────
 const WS_BASE = 'wss://api.600g.net/ws/chat/';
 const WS_FALLBACK = 'ws://localhost:8000/ws/chat/';
-const AGENT_TEAMS = [
-  { id: 'trading-bot', name: '매매봇', emoji: '🤖' },
-  { id: 'cpo-claude', name: 'CPO', emoji: '🧠' },
-  { id: 'date-map', name: '데이트지도', emoji: '🗺️' },
-];
+const WS_TEAM_ID = 'trading-bot';
 let wsConn = null;
-let wsTeamId = 'trading-bot';
+let wsTeamId = WS_TEAM_ID;
 let wsStreaming = false;
 let wsStreamBubble = null;
 let wsMessages = {}; // teamId -> [{type, content}]
 
 function initChat() {
-  // 팀 칩 렌더링
-  const chips = document.getElementById('teamChips');
-  chips.innerHTML = AGENT_TEAMS.map(t =>
-    `<span class="chip ${t.id === wsTeamId ? 'active' : ''}" onclick="switchTeam('${t.id}')">${t.emoji} ${t.name}</span>`
-  ).join('');
-  connectWS();
-}
-
-function switchTeam(teamId) {
-  if (wsStreaming) { showToast('응답 중에는 전환 불가', 'warn'); return; }
-  if (wsConn) { wsConn.close(); wsConn = null; }
-  wsTeamId = teamId;
-  // 칩 active 업데이트
-  document.querySelectorAll('.team-select .chip').forEach(c => {
-    c.classList.toggle('active', c.textContent.includes(AGENT_TEAMS.find(t=>t.id===teamId)?.name));
-  });
-  renderChatLog();
   connectWS();
 }
 
 function setWsStatus(state) {
   const el = document.getElementById('wsStatus');
-  const team = AGENT_TEAMS.find(t => t.id === wsTeamId);
-  if (state === 'on') el.innerHTML = `<span class="ws-dot on"></span> ${team?.emoji} ${team?.name} 연결됨`;
-  else if (state === 'connecting') el.innerHTML = `<span class="ws-dot connecting"></span> 연결 중...`;
-  else el.innerHTML = `<span class="ws-dot off"></span> 연결 안 됨`;
+  if (state === 'on') el.innerHTML = '<span class="ws-dot on"></span> 🤖 매매봇 연결됨';
+  else if (state === 'connecting') el.innerHTML = '<span class="ws-dot connecting"></span> 연결 중...';
+  else el.innerHTML = '<span class="ws-dot off"></span> 연결 안 됨';
 }
 
 function connectWS() {
@@ -863,8 +837,7 @@ function renderChatLog() {
   const log = document.getElementById('chatLog');
   const msgs = wsMessages[wsTeamId] || [];
   if (msgs.length === 0) {
-    const team = AGENT_TEAMS.find(t => t.id === wsTeamId);
-    log.innerHTML = `<div style="text-align:center;color:#484f58;font-size:11px;padding:20px 0">${team?.emoji} ${team?.name}에게 메시지를 보내보세요<br><span style="font-size:10px">예: "현재 봇 상태 알려줘"</span></div>`;
+    log.innerHTML = '<div style="text-align:center;color:#484f58;font-size:11px;padding:20px 0">🤖 매매봇에게 메시지를 보내보세요<br><span style="font-size:10px">예: "현재 봇 상태 알려줘"</span></div>';
     return;
   }
   log.innerHTML = msgs.map(m => {
