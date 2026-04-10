@@ -202,15 +202,13 @@ class TradingBotV3:
         # SQLite DB 초기화
         self._init_db()
 
-        # v5.20: AI 멀티에이전트 초기화 (_init_db 이후, _db_lock 존재 보장)
+        # v5.20→v6.0: AI 멀티에이전트 초기화 (CLI 기반, Max 플랜 무료)
         try:
             from ai_agents import AIAgents
-            _ai_key = getattr(self, '_anthropic_key', '')
             self.ai_agents = AIAgents(
                 db_path=os.path.join(os.path.dirname(__file__), 'trading_bot_v3.db'),
                 db_lock=self._db_lock,
-                api_key=_ai_key,
-                enabled=bool(_ai_key)
+                enabled=True
             )
         except Exception as e:
             print(f"⚠️ [AI] 에이전트 초기화 실패: {e} (기존 로직으로 동작)")
@@ -3480,6 +3478,12 @@ class TradingBotV3:
         # v4.4: 사이클 시작 시 AutoTune 규칙 캐시 갱신
         self._autotune_apply_rules()
 
+        # v7.0: AI 교훈 기반 파라미터 자동 조정 (되먹임 루프)
+        if hasattr(self, 'ai_agents') and self.ai_agents and self.ai_agents.enabled:
+            self._ai_lesson_adj = self.ai_agents.get_lesson_adjustments()
+        else:
+            self._ai_lesson_adj = {}
+
         # v5.15: 심야(23~06시) 신규 매수 플래그 (포지션 관리는 유지)
         _cur_hour_cycle = datetime.now().hour
         self._nighttime_no_buy = (_cur_hour_cycle >= 23 or _cur_hour_cycle < 6)
@@ -3633,6 +3637,13 @@ class TradingBotV3:
             elif _cur_hour < 5 and 'midnight' in _time_boost:
                 min_score = min(min_score + _time_boost['midnight'], 35)
 
+        # v7.0: AI 교훈 overchase 빈도 → 진입 기준 추가 강화
+        _ai_adj = getattr(self, '_ai_lesson_adj', {})
+        _ai_mom_boost = _ai_adj.get('momentum_boost', 0)
+        if _ai_mom_boost > 0:
+            min_score += _ai_mom_boost
+            print(f"🤖 [AI 교훈] 진입 기준 +{_ai_mom_boost}점 → {min_score}점 ({_ai_adj.get('reason_entry', '')})")
+
         # 코인 선택
         selected = self.select_coins()
         print(f"🎯 선택된 코인: {selected}\n")
@@ -3661,11 +3672,13 @@ class TradingBotV3:
             if remaining_slots <= 0:
                 break
 
-            # v5.28: 신규 진입 쿨타임 5분 (10분→5분, 거래 빈도 회복)
+            # v7.0: 신규 진입 쿨타임 8분 (5분→8분, 거래 빈도 억제로 수수료 절감)
+            _ai_cooldown_boost = getattr(self, '_ai_lesson_adj', {}).get('cooldown_boost', 0)
+            _entry_cooldown = 480 + _ai_cooldown_boost  # 기본 8분 + AI 교훈 추가
             _last_entry = getattr(self, '_last_new_entry_time', 0)
-            if time.time() - _last_entry < 300:
-                _remaining_cool = int((300 - (time.time() - _last_entry)) / 60)
-                print(f"⏳ 신규 진입 쿨타임 5분 미경과 (잔여 {_remaining_cool}분) → 패스")
+            if time.time() - _last_entry < _entry_cooldown:
+                _remaining_cool = int((_entry_cooldown - (time.time() - _last_entry)) / 60)
+                print(f"⏳ 신규 진입 쿨타임 {_entry_cooldown//60}분 미경과 (잔여 {_remaining_cool}분) → 패스")
                 break
 
             # 이미 보유 중인 코인 스킵
@@ -4021,7 +4034,8 @@ class TradingBotV3:
                         'volume_score': self.analyze_volume(coin),
                         'momentum': momentum,
                         'market_state': market_strength,
-                        'coin_record': _coin_record,  # 백테스트 전적 추가
+                        'fear_greed': getattr(self, '_fear_greed_index', '?'),
+                        'coin_record': _coin_record,
                     }
                     _ai_result = self.ai_agents.pre_buy_check(coin, _ai_indicators)
                     if not _ai_result['approved']:
@@ -4616,9 +4630,10 @@ class TradingBotV3:
                     # ── AI 토론 (v5.24: surge도 AI 필수) ──
                     if hasattr(self, 'ai_agents') and self.ai_agents and self.ai_agents.enabled:
                         _ai_ind = {
-                            'rsi': 50, 'volume_score': min(100, vol_ratio * 30),  # surge는 RSI 미사용, 중립값
-                            'momentum': price_chg_10m * 1000,  # 상승률을 점수화
-                            'market_state': getattr(self, 'last_market_state', '보통')
+                            'rsi': 50, 'volume_score': min(100, vol_ratio * 30),
+                            'momentum': price_chg_10m * 1000,
+                            'market_state': getattr(self, 'last_market_state', '보통'),
+                            'fear_greed': getattr(self, '_fear_greed_index', '?'),
                         }
                         _ai_res = self.ai_agents.pre_buy_check(coin, _ai_ind)
                         if not _ai_res['approved']:
@@ -5113,13 +5128,15 @@ class TradingBotV3:
                 if profit_rate > position.get('peak_rate', 0):
                     position['peak_rate'] = profit_rate
 
-                # v5.23: 최소 보유 15분 (0% 즉시매도 근절) — 급락(-2%)만 예외
+                # v7.0: AI 교훈 기반 최소 보유시간 (early_exit 방지)
+                _ai_adj = getattr(self, '_ai_lesson_adj', {})
+                _min_hold = _ai_adj.get('min_hold_minutes', 15)
                 minutes_held = hours * 60
-                if minutes_held < 15 and profit_rate > -0.02:
+                if minutes_held < _min_hold and profit_rate > -0.02:
                     if minutes_held <= 1 and profit_rate <= -0.02:
                         pass  # 급락은 아래에서 처리
                     else:
-                        print(f"  {coin} {batch_id}: {profit_rate*100:+.2f}% | {minutes_held:.0f}분 | ⏳ 최소보유 15분 미달, 홀딩")
+                        print(f"  {coin} {batch_id}: {profit_rate*100:+.2f}% | {minutes_held:.0f}분 | ⏳ 최소보유 {_min_hold}분 미달, 홀딩")
                         continue
 
                 # ★ 빠른 컷: 급락(-2%) 즉시컷만 유지 (5분 컷 제거 — 보유시간 늘리기)
@@ -5225,14 +5242,31 @@ class TradingBotV3:
                         if collapse_key in self._collapse_count:
                             del self._collapse_count[collapse_key]
 
-                # === 1-2. 모멘텀 급락 + 수익 있음 → 수익 확보 매도 ===
-                # v5.19: 기준 완화 (모멘텀 30→20, 수익 0.5%→1.0%)
-                # 데이터: 수익 21%가 조기매도, 모멘텀 일시 하락 후 재상승 케이스 많음
+                # === 1-2. 모멘텀 급락 + 수익 있음 → AI 매도 토론 후 결정 ===
+                # v7.0: early_exit 방지 — 모멘텀 급락해도 AI가 홀딩 추천하면 유지
                 if momentum < 20 and profit_rate >= 0.01:
-                    print(f"⚡ {coin} {batch_id} 모멘텀 급락({momentum}점) → 수익 확보 ({profit_rate*100:+.2f}%)")
-                    self.place_sell_order(coin, batch_id)
-                    self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False}
-                    continue
+                    _do_sell = True
+                    if hasattr(self, 'ai_agents') and self.ai_agents and self.ai_agents.enabled:
+                        try:
+                            _sell_ind = {
+                                'profit_rate': profit_rate,
+                                'peak_rate': position.get('peak_rate', 0),
+                                'minutes_held': minutes_held,
+                                'momentum': momentum,
+                                'volume_score': self.analyze_volume(coin),
+                                'trend': '상승' if uptrend else '하락/횡보',
+                            }
+                            _sell_result = self.ai_agents.pre_sell_check(coin, _sell_ind)
+                            if not _sell_result.get('should_sell', True):
+                                _do_sell = False
+                                print(f"  🤖 {coin} {batch_id} AI 홀딩 추천 ({_sell_result.get('summary', '')})")
+                        except Exception:
+                            pass
+                    if _do_sell:
+                        print(f"⚡ {coin} {batch_id} 모멘텀 급락({momentum}점) → 수익 확보 ({profit_rate*100:+.2f}%)")
+                        self.place_sell_order(coin, batch_id)
+                        self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False}
+                        continue
 
                 # === 2. 익절 (v4.0: S/R 저항선 + 트레일링 + fallback %) ===
                 sr_tp_triggered = False
@@ -5259,12 +5293,17 @@ class TradingBotV3:
                     continue
 
                 # 2-2. fallback 타겟 (S/R이 잡지 못한 경우)
+                # v7.0: 타겟 상향 — 손절 -0.7% 대비 최소 2배 수익 목표 (R:R 2:1)
                 if momentum >= 70:
-                    target = 0.04    # 고모멘텀: 4% (S/R이 먼저 잡으므로 확대)
+                    target = 0.05    # 고모멘텀: 5%
                 elif momentum >= 50:
-                    target = 0.03    # 중모멘텀: 3%
+                    target = 0.04    # 중모멘텀: 4%
                 else:
-                    target = 0.02    # 저모멘텀: 2%
+                    target = 0.03    # 저모멘텀: 3% (기존 2% → 상향)
+                # AI 교훈이 최소 익절 타겟 제안하면 적용
+                _ai_min_target = _ai_adj.get('min_profit_target', 0)
+                if _ai_min_target > 0:
+                    target = max(target, _ai_min_target)
 
                 # 2-3. 트레일링 스탑 (v4.2: 모멘텀 기반 동적 트레일링)
                 trailing_key = f"{coin}_{batch_id}_peak"
@@ -5315,6 +5354,10 @@ class TradingBotV3:
                         if _atr['rule_type'] == 'trailing_adjust':
                             trail_drop = max(0.003, trail_drop + _atr['param_value'])
                             break
+                    # v7.0: AI 교훈 early_exit → 트레일링 폭 추가 확대 (조기 익절 방지)
+                    _trail_boost = _ai_adj.get('trailing_drop_boost', 0)
+                    if _trail_boost > 0:
+                        trail_drop += _trail_boost
                     if current_peak - profit_rate >= trail_drop:
                         # v5.22: 모멘텀 살아있으면 1% 이상까지 참기 (가능하면 더 먹기)
                         # 모멘텀 죽으면(<30) 바로 매도 OK
@@ -5440,11 +5483,36 @@ class TradingBotV3:
                 _mom_alive = momentum >= 20 or uptrend
 
                 # 0. 최대 보유 60분 캡 (데이터: 60분+ = -27.6만, 강제 정리)
+                # v7.0: +1% 이상 수익 중이면 AI 토론 후 홀딩 가능
                 if minutes_held >= 60 and profit_rate < 0.01:
                     print(f"⏰ {coin} {batch_id} 60분 캡 ({profit_rate*100:+.2f}%, 모멘텀{momentum:.0f}) → 정리")
                     self.place_sell_order(coin, batch_id)
                     self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': profit_rate < 0, 'exit_price': price}
                     continue
+                elif minutes_held >= 60 and profit_rate >= 0.01:
+                    # 수익 중이면 AI에게 물어보기
+                    _extend_hold = False
+                    if hasattr(self, 'ai_agents') and self.ai_agents and self.ai_agents.enabled:
+                        try:
+                            _sell_ind = {
+                                'profit_rate': profit_rate,
+                                'peak_rate': position.get('peak_rate', 0),
+                                'minutes_held': minutes_held,
+                                'momentum': momentum,
+                                'volume_score': self.analyze_volume(coin),
+                                'trend': '상승' if uptrend else '하락/횡보',
+                            }
+                            _sell_res = self.ai_agents.pre_sell_check(coin, _sell_ind)
+                            if not _sell_res.get('should_sell', True):
+                                _extend_hold = True
+                                print(f"  🤖 {coin} {batch_id} 60분+ 수익{profit_rate*100:+.2f}% AI 홀딩 연장 ({_sell_res.get('summary', '')})")
+                        except Exception:
+                            pass
+                    if not _extend_hold:
+                        print(f"⏰ {coin} {batch_id} 60분 캡 수익{profit_rate*100:+.2f}% → AI 미승인/미응답, 정리")
+                        self.place_sell_order(coin, batch_id)
+                        self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': False, 'exit_price': price}
+                        continue
 
                 # 1. 수익 중(+0.3%) + 모멘텀/추세 OK → 홀딩 (트레일링 보호, 60분 캡 적용됨)
                 if profit_rate >= 0.003 and _mom_alive:
