@@ -224,10 +224,12 @@ class DebateAgent:
         prompt = self._build_prompt(coin, indicators, lessons)
         response = self.cli.call(prompt)
         if not response:
+            # v7.1: LLM 미응답 시 안전을 위해 매수 차단 (기존: 허용)
+            # 과거 문제: ANKR -6.9% 손실 케이스가 LLM 미응답으로 통과됨
             return {
-                'verdict': 'buy', 'confidence': 0.5, 'bear_severity': 0,
-                'summary': 'LLM 미응답', 'should_block': False,
-                'ratio': 100, 'stop_loss': -5, 'target': [3, 5], 'risk': '미확인'
+                'verdict': 'skip', 'confidence': 0.0, 'bear_severity': 10,
+                'summary': 'LLM 미응답 → 안전 차단', 'should_block': True,
+                'ratio': 0, 'stop_loss': -5, 'target': [3, 5], 'risk': '미확인'
             }
 
         return self._parse_response(response)

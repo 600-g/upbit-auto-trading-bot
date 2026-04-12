@@ -3213,6 +3213,11 @@ class TradingBotV3:
                 print(f"🌙 {coin} 매수 차단: 심야 시간대 (포지션 관리만)")
                 return False
 
+            # v5.8: 9시(09:00-09:59) 모든 경로 매수 차단 (백테스트 기반)
+            if getattr(self, '_morning_no_buy', False):
+                print(f"⏸ {coin} 매수 차단: 9시 매매 금지 시간대")
+                return False
+
             # ★ 투자유의/거래종료 종목 절대 금지
             if hasattr(self, '_warning_coins') and coin in self._warning_coins:
                 print(f"🚫 {coin} 매수 차단: 투자유의/거래종료 예정 종목")
@@ -3490,6 +3495,11 @@ class TradingBotV3:
         if self._nighttime_no_buy:
             print(f"🌙 심야({_cur_hour_cycle:02d}시) → 포지션 관리만, 신규 매수 차단")
 
+        # v5.8: 9시(09:00-09:59) 신규 매수 금지 (백테스트 기반 — 개장 변동성 회피)
+        self._morning_no_buy = (_cur_hour_cycle == 9)
+        if self._morning_no_buy:
+            print(f"⏸ 9시 매매 금지 시간대 — 스킵")
+
         # 포지션 모니터링
         self.monitor_positions()
 
@@ -3522,37 +3532,88 @@ class TradingBotV3:
                         if current_price:
                             price_drop = (current_price - batch1_pos['buy_price']) / batch1_pos['buy_price']
 
-                            # v6.1: 1차 손실이 -0.5% 이상이면 2차 추가매수 금지
-                            # 데이터: MMT 1차 -3.17% + 2차 -2.39% = -11.9만 (전체 손실 대부분)
-                            if price_drop <= -0.005:
-                                print(f"🚫 {coin} 2차 매수 취소: 1차 손실 {price_drop*100:+.2f}% ≤ -0.5% (추가 손실 방지)")
+                            # v7.1: 1차 손실 -0.3% 이상이면 취소 (타이트)
+                            # 데이터: batch_2 7건 -21k 손실, -0.5% 기준 너무 느슨함
+                            if price_drop <= -0.003:
+                                print(f"🚫 {coin} 2차 매수 취소: 1차 손실 {price_drop*100:+.2f}% ≤ -0.3% (추가 손실 방지)")
                                 del self._pending_2nd_buy[coin]
                                 continue
 
-                            # 조건1: 현재가 < 1차 매수가 (진짜 물타기만)
-                            if price_drop >= 0:
+                            # 조건1: 현재가 < 1차 매수가 (진짜 물타기만) — 단 -0.1% 이상 하락했을 때만
+                            if price_drop >= -0.001:
                                 if elapsed_min >= 20:
-                                    # 20분 경과해도 가격이 안 내려감 → 2차 포기
-                                    print(f"🚫 {coin} 2차 매수 포기: 20분 경과 + 가격 미하락 ({price_drop*100:+.2f}%)")
+                                    print(f"🚫 {coin} 2차 매수 포기: 20분 경과 + 하락폭 미미 ({price_drop*100:+.2f}%)")
                                     del self._pending_2nd_buy[coin]
                                 else:
-                                    print(f"⏳ {coin} 2차 대기: 가격 미하락 ({price_drop*100:+.2f}%) | 모멘텀 {mom_2nd}점 | {elapsed_min:.0f}분/{20}분")
+                                    print(f"⏳ {coin} 2차 대기: 하락폭 미미 ({price_drop*100:+.2f}%) | 모멘텀 {mom_2nd}점 | {elapsed_min:.0f}분/{20}분")
                                     entry['time'] = time.time()
                                 continue
 
-                            # 조건2: 모멘텀 ≥ 1차 - 10 (모멘텀 급락 방어)
-                            if mom_2nd < mom_1st - 10:
+                            # 조건2: 모멘텀 ≥ 1차 - 5 (v7.1: -10 → -5 강화)
+                            if mom_2nd < mom_1st - 5:
                                 if elapsed_min >= 20:
-                                    print(f"🚫 {coin} 2차 매수 포기: 모멘텀 급락 ({mom_1st}→{mom_2nd}점, 기준 {mom_1st-10}점)")
+                                    print(f"🚫 {coin} 2차 매수 포기: 모멘텀 급락 ({mom_1st}→{mom_2nd}점, 기준 {mom_1st-5}점)")
                                     del self._pending_2nd_buy[coin]
                                 else:
                                     print(f"⏳ {coin} 2차 대기: 모멘텀 급락 ({mom_1st}→{mom_2nd}점) | {price_drop*100:+.2f}% | {elapsed_min:.0f}분/{20}분")
                                     entry['time'] = time.time()
                                 continue
 
-                            # 두 조건 모두 충족 → 물타기 진입
+                            # v7.1: 조건3 — 반등 신호 필수 (최근 3분봉 마지막 양봉)
+                            try:
+                                _rebound_ok = False
+                                _1m = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute1", count=3)
+                                if _1m is not None and len(_1m) >= 3:
+                                    last = _1m.iloc[-1]
+                                    if last['close'] > last['open']:  # 마지막 1분봉 양봉
+                                        _rebound_ok = True
+                                if not _rebound_ok:
+                                    if elapsed_min >= 20:
+                                        print(f"🚫 {coin} 2차 매수 포기: 반등 신호 없음 (1분봉 음봉)")
+                                        del self._pending_2nd_buy[coin]
+                                    else:
+                                        print(f"⏳ {coin} 2차 대기: 반등 신호 대기 | {elapsed_min:.0f}분/{20}분")
+                                        entry['time'] = time.time()
+                                    continue
+                            except Exception:
+                                pass
+
+                            # v7.1: 조건4 — 거래량 살아있어야 함 (점수 40+)
+                            try:
+                                _vol_2nd = self.analyze_volume(coin)
+                                if _vol_2nd < 40:
+                                    if elapsed_min >= 20:
+                                        print(f"🚫 {coin} 2차 매수 포기: 거래량 부족 ({_vol_2nd}점 < 40)")
+                                        del self._pending_2nd_buy[coin]
+                                    else:
+                                        print(f"⏳ {coin} 2차 대기: 거래량 {_vol_2nd}점 < 40 | {elapsed_min:.0f}분/{20}분")
+                                        entry['time'] = time.time()
+                                    continue
+                            except Exception:
+                                _vol_2nd = 50
+
+                            # v7.1: 조건5 — AI 토론 (매수 직전 검증)
+                            if hasattr(self, 'ai_agents') and self.ai_agents and self.ai_agents.enabled:
+                                try:
+                                    _ai_ind_2nd = {
+                                        'rsi': self.analyze_rsi(coin),
+                                        'volume_score': _vol_2nd,
+                                        'momentum': mom_2nd,
+                                        'market_state': getattr(self, 'last_market_state', '보통'),
+                                        'fear_greed': getattr(self, '_fear_greed_index', '?'),
+                                        'coin_record': f"\n물타기 시도 (1차 대비 {price_drop*100:+.2f}%, 1차 모멘텀 {mom_1st}→현재 {mom_2nd})",
+                                    }
+                                    _ai_res_2nd = self.ai_agents.pre_buy_check(coin, _ai_ind_2nd)
+                                    if not _ai_res_2nd['approved']:
+                                        print(f"🚫 {coin} 2차 매수 취소 (AI 차단): {_ai_res_2nd.get('block_reason', '')}")
+                                        del self._pending_2nd_buy[coin]
+                                        continue
+                                except Exception:
+                                    pass
+
+                            # 모든 조건 충족 → 물타기 진입
                             should_buy = True
-                            reason = f"물타기 진입 (1차 대비 {price_drop*100:+.2f}%, 모멘텀 {mom_1st}→{mom_2nd}점)"
+                            reason = f"물타기 (1차대비 {price_drop*100:+.2f}%, 모멘텀 {mom_1st}→{mom_2nd}, 거래량 {_vol_2nd}점, 반등↑, AI✓)"
                     else:
                         should_buy = True
                         reason = "1차 포지션 없음 → 즉시 진입"
@@ -4072,7 +4133,11 @@ class TradingBotV3:
 
         # === v3.2: 유휴 자금 → 보유 코인 추가 매수 (물타기) ===
         # 신규 매수 후에도 가용 자금이 남아있으면, 모멘텀 유지 중인 보유 코인에 추가 투자
-        if available >= 10000 and self.positions:
+        # v5.8: batch_2 물타기 비활성화 (백테스트 기반 — 추가매수 손실 방지)
+        _batch2_enabled = False  # True로 변경하면 물타기 재활성화
+        if not _batch2_enabled and available >= 10000 and self.positions:
+            print(f"⏸ batch_2 물타기 비활성화 — 스킵 (유휴 자금 {available:,.0f}원)")
+        if _batch2_enabled and available >= 10000 and self.positions:
             print(f"\n💡 유휴 자금 {available:,.0f}원 → 보유 코인 추가 매수 검토")
             # 보유 코인 중 모멘텀 순으로 정렬
             position_momentums = []
@@ -4114,7 +4179,10 @@ class TradingBotV3:
 
         # === v4.1: 대안 없을 때 수익 포지션 집중 추가 투입 ===
         # 신규 진입 0건 + 유휴자금 남음 + 보유 코인이 수익 중일 때
-        if available >= 10000 and self.positions and remaining_slots > 0:
+        # v5.8: batch_2 물타기 비활성화에 따라 집중 투입도 비활성화
+        if not _batch2_enabled and available >= 10000 and self.positions and remaining_slots > 0:
+            pass  # 비활성화 (위에서 이미 로그 출력)
+        elif _batch2_enabled and available >= 10000 and self.positions and remaining_slots > 0:
             # 이번 사이클에서 신규 진입이 없었는지 확인 (가용금이 줄지 않았으면 진입 없음)
             initial_available = min(self.current_balance + sum(pos['amount'] for batches in self.positions.values() for pos in batches.values()), MAX_TRADING_BUDGET) - invested
             no_new_entry = (available >= initial_available * 0.9)  # 거의 안 줄었으면 신규진입 없음
@@ -4861,12 +4929,29 @@ class TradingBotV3:
 
                 sell_reason = None
 
+                # v7.1: 긴급 손절 백업 (데이터: ANKR -6.9% 방치 재발 방지)
+                # -2.5% 이하는 무조건 즉시 매도, 재시도 3회 (매도 실패 내성)
+                if profit_rate <= -0.025:
+                    print(f"🚨 [SURGE 긴급손절] {coin} {profit_rate*100:+.2f}% ≤ -2.5% → 강제 매도 시도")
+                    for _retry in range(3):
+                        try:
+                            if self.mode == "real" and self.upbit:
+                                _r = self.upbit.sell_market_order(f"KRW-{coin}", pos['quantity'])
+                                if _r and not (isinstance(_r, dict) and 'error' in _r):
+                                    break
+                            else:
+                                break
+                        except Exception as _e:
+                            print(f"  ⚠️ 재시도 {_retry+1}/3: {_e}")
+                            time.sleep(1)
+                    sell_reason = f"긴급손절 {profit_rate*100:+.2f}% (-2.5% 백업)"
+
                 # v5.29: surge 매도 — 손절 최우선, 홀딩은 수익 구간만
                 #
                 # ★ 1순위: 손절 (시간 무관, 무조건 최우선)
                 # -0.7% 이하면 즉시 컷 — 유예 없음
                 # (데이터: 0-3분 손절 34건 -120만원, 거래량 유예가 -5.26% 방치 원인)
-                if profit_rate <= -0.007:
+                elif profit_rate <= -0.007:
                     sell_reason = f"손절 {profit_rate*100:+.2f}%"
 
                 # ★ 2순위: 5분 미만 홀딩 (손실 아닌 경우만)
@@ -5142,6 +5227,13 @@ class TradingBotV3:
                 # ★ 빠른 컷: 급락(-2%) 즉시컷만 유지 (5분 컷 제거 — 보유시간 늘리기)
                 if minutes_held <= 1 and profit_rate <= -0.02:
                     print(f"✂️ {coin} {batch_id} 급락 즉시컷 ({minutes_held:.0f}분, {profit_rate*100:+.2f}% ≤ -2.0%)")
+                    self.place_sell_order(coin, batch_id)
+                    self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': True, 'exit_price': price}
+                    continue
+
+                # v7.1: 긴급 손절 백업 — -3% 이하는 시간 무관 강제 매도
+                if profit_rate <= -0.03:
+                    print(f"🚨 {coin} {batch_id} 긴급손절 ({profit_rate*100:+.2f}% ≤ -3%) → 강제 매도")
                     self.place_sell_order(coin, batch_id)
                     self._sell_cooldown[coin] = {'time': time.time(), 'stoploss': True, 'exit_price': price}
                     continue
