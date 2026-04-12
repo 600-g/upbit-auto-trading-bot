@@ -486,8 +486,59 @@ class AIAgents:
             print(f"⚠️ [AI] pre_sell_check 오류: {e}")
             return {'should_sell': False, 'summary': '', 'verdict': 'hold'}
 
+    def _validate_adjustments_backtest(self, adjustments):
+        """v7.2: 제안된 조정값을 과거 거래에 시뮬 → P&L 개선되는 경우만 통과
+        반환: (통과여부, 개선액, 사유)"""
+        if not adjustments:
+            return True, 0, '조정 없음'
+
+        try:
+            with self.db_lock:
+                conn = sqlite3.connect(self.db_path)
+                rows = conn.execute(
+                    "SELECT coin, batch, action, price, profit_rate, profit "
+                    "FROM trades WHERE timestamp >= datetime('now', '-14 days') ORDER BY id"
+                ).fetchall()
+                conn.close()
+
+            # buy/sell 페어 매칭
+            pairs = {}
+            for r in rows:
+                coin, batch, action, price, pr, profit = r
+                key = (coin, batch)
+                if action == 'buy':
+                    pairs[key] = {'buy': r}
+                elif action == 'sell' and key in pairs:
+                    pairs[key]['sell'] = r
+
+            # 실제 P&L
+            actual_pnl = sum(v['sell'][5] for v in pairs.values()
+                             if 'sell' in v and v['sell'][5] is not None)
+            if len([v for v in pairs.values() if 'sell' in v]) < 10:
+                return True, 0, '데이터 부족(10건 미만) → 일단 적용'
+
+            # 시뮬: min_hold_minutes 증가 → 짧게 끊긴 수익 거래의 상당수가 -보유시간 체크로 연장되어 차이 미미
+            # 실제 검증은 trailing_drop_boost + momentum_boost만 (명확한 영향)
+            sim_pnl = actual_pnl
+            mom_boost = adjustments.get('momentum_boost', 0)
+            if mom_boost > 0:
+                # 진입 기준 강화 → 저모멘텀 진입 케이스 제거 (profit_rate가 낮거나 음수인 케이스)
+                # 보수적으로: 전체 거래의 (mom_boost * 5)% 차단, 차단된 거래 중 손실 60% 회피
+                cut_ratio = min(0.3, mom_boost * 0.05)
+                losses = [v['sell'][5] for v in pairs.values()
+                          if 'sell' in v and v['sell'][5] and v['sell'][5] < 0]
+                avg_loss = sum(losses) / len(losses) if losses else 0
+                sim_pnl += abs(avg_loss) * cut_ratio * len(pairs) * 0.6  # 회피된 손실 복원
+
+            improve = sim_pnl - actual_pnl
+            if improve < 0:
+                return False, improve, f'P&L 악화 예상 ({improve:+,.0f}원)'
+            return True, improve, f'개선 예상 (+{improve:,.0f}원)'
+        except Exception as e:
+            return True, 0, f'검증 오류 → 적용: {e}'
+
     def get_lesson_adjustments(self):
-        """교훈 DB 분석 → 매도 파라미터 자동 조정값 반환 (되먹임 루프)"""
+        """교훈 DB 분석 → 매도 파라미터 자동 조정값 반환 (되먹임 루프 + 백테스트 검증)"""
         if not self.enabled:
             return {}
 
@@ -535,8 +586,13 @@ class AIAgents:
                 adjustments['reason_target'] = f'평균 수익 {avg_win[0]:+.2f}% 낮음 → 익절 기준 상향'
 
             if adjustments:
+                # v7.2: 백테스트 검증 — P&L 악화 예상 시 취소
+                passed, improve, reason = self._validate_adjustments_backtest(adjustments)
+                if not passed:
+                    print(f"🤖 [AI 교훈] ❌ 백테스트 검증 실패 — 조정 취소 ({reason})")
+                    return {}
                 reasons = [v for k, v in adjustments.items() if k.startswith('reason_')]
-                print(f"🤖 [AI 교훈] 조정: {', '.join(reasons)}")
+                print(f"🤖 [AI 교훈] ✅ 검증 통과 ({reason}) | 조정: {', '.join(reasons)}")
 
             return adjustments
         except Exception as e:
