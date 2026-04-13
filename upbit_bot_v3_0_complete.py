@@ -3489,6 +3489,31 @@ class TradingBotV3:
         else:
             self._ai_lesson_adj = {}
 
+        # v7.4: 시장 상태별 동적 적응 — 강세/약세/과열에 따라 모든 파라미터 조정
+        try:
+            _mkt, _base = self.check_market_strength()
+            fg = getattr(self, '_fear_greed_index', 50) or 50
+            _fg_val = int(fg) if isinstance(fg, (int, float)) else 50
+            self._market_adapt = {
+                'mode': 'normal',
+                'entry_adj': 0,     # 진입 기준 모멘텀 조정
+                'tp_boost': 0,      # 익절 타겟 추가
+                'sl_tight': 0,      # 손절 타이트화
+            }
+            if _mkt in ('강세', '과열') and _fg_val < 75:
+                self._market_adapt = {'mode': '트렌드', 'entry_adj': -3, 'tp_boost': 0.01, 'sl_tight': 0}
+            elif _mkt == '약세' or _fg_val < 25:
+                self._market_adapt = {'mode': '방어', 'entry_adj': +5, 'tp_boost': 0, 'sl_tight': -0.002}
+            elif _fg_val >= 80:
+                self._market_adapt = {'mode': '과열', 'entry_adj': +3, 'tp_boost': -0.005, 'sl_tight': -0.002}
+            elif _mkt == '보통':
+                self._market_adapt = {'mode': '횡보', 'entry_adj': +1, 'tp_boost': 0, 'sl_tight': 0}
+            if self._market_adapt['mode'] != 'normal':
+                ma = self._market_adapt
+                print(f"🎯 [시장적응] {ma['mode']} 모드: 진입{ma['entry_adj']:+d}점 익절{ma['tp_boost']*100:+.1f}% 손절{ma['sl_tight']*100:+.1f}%")
+        except Exception:
+            self._market_adapt = {'mode': 'normal', 'entry_adj': 0, 'tp_boost': 0, 'sl_tight': 0}
+
         # v7.4: 심야 차단 해제 (베타 24시간 운영, 데이터 축적)
         _cur_hour_cycle = datetime.now().hour
         self._nighttime_no_buy = False  # 전 시간대 매매 허용
@@ -3702,6 +3727,12 @@ class TradingBotV3:
         if _ai_mom_boost > 0:
             min_score += _ai_mom_boost
             print(f"🤖 [AI 교훈] 진입 기준 +{_ai_mom_boost}점 → {min_score}점 ({_ai_adj.get('reason_entry', '')})")
+
+        # v7.4: 시장 적응 — 강세장이면 진입 기준 완화, 약세면 강화
+        _ma = getattr(self, '_market_adapt', {'entry_adj': 0})
+        if _ma.get('entry_adj', 0) != 0:
+            min_score = max(10, min_score + _ma['entry_adj'])
+            print(f"🎯 [시장적응] 진입 기준 {_ma['entry_adj']:+d}점 → {min_score}점")
 
         # 코인 선택
         selected = self.select_coins()
@@ -5404,6 +5435,10 @@ class TradingBotV3:
                 _ai_min_target = _ai_adj.get('min_profit_target', 0)
                 if _ai_min_target > 0:
                     target = max(target, _ai_min_target)
+                # v7.4: 시장 적응 — 강세장이면 익절 상향, 과열이면 하향
+                _ma_tp = getattr(self, '_market_adapt', {}).get('tp_boost', 0)
+                if _ma_tp != 0:
+                    target = max(0.015, target + _ma_tp)
 
                 # 2-3. 트레일링 스탑 (v4.2: 모멘텀 기반 동적 트레일링)
                 trailing_key = f"{coin}_{batch_id}_peak"
