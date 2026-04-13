@@ -3500,14 +3500,16 @@ class TradingBotV3:
                 'tp_boost': 0,      # 익절 타겟 추가
                 'sl_tight': 0,      # 손절 타이트화
             }
+            # v7.4.2: 데모 6일 베타 — 방어 모드 제거, 모든 시장에서 적극 거래 (데이터 축적)
             if _mkt in ('강세', '과열') and _fg_val < 75:
-                self._market_adapt = {'mode': '트렌드', 'entry_adj': -3, 'tp_boost': 0.01, 'sl_tight': 0}
+                self._market_adapt = {'mode': '트렌드', 'entry_adj': -5, 'tp_boost': 0.015, 'sl_tight': 0}
             elif _mkt == '약세' or _fg_val < 25:
-                self._market_adapt = {'mode': '방어', 'entry_adj': +5, 'tp_boost': 0, 'sl_tight': -0.002}
+                # 방어 대신 역추세 매수 시도 (데이터 축적 우선)
+                self._market_adapt = {'mode': '역추세', 'entry_adj': -2, 'tp_boost': 0, 'sl_tight': 0}
             elif _fg_val >= 80:
-                self._market_adapt = {'mode': '과열', 'entry_adj': +3, 'tp_boost': -0.005, 'sl_tight': -0.002}
+                self._market_adapt = {'mode': '과열급락대비', 'entry_adj': 0, 'tp_boost': -0.005, 'sl_tight': 0}
             elif _mkt == '보통':
-                self._market_adapt = {'mode': '횡보', 'entry_adj': +1, 'tp_boost': 0, 'sl_tight': 0}
+                self._market_adapt = {'mode': '횡보', 'entry_adj': -1, 'tp_boost': 0, 'sl_tight': 0}
             if self._market_adapt['mode'] != 'normal':
                 ma = self._market_adapt
                 print(f"🎯 [시장적응] {ma['mode']} 모드: 진입{ma['entry_adj']:+d}점 익절{ma['tp_boost']*100:+.1f}% 손절{ma['sl_tight']*100:+.1f}%")
@@ -3690,9 +3692,9 @@ class TradingBotV3:
             self._last_percentile_threshold = round(min_score, 1)
             print(f"📈 시장 상태: {market_strength} | 미국: {us_state} → 최소 신호: {min_score}점 (fallback)")
 
-        # 극약세: 개별 강세 코인만 허용 (v3.3: 완전 중단 → 선별 진입)
+        # v7.4.2: 극약세도 진입 허용 (데모 베타, 데이터 축적)
         if market_strength == "극약세":
-            print("⚠️ 극약세 시장 → 개별 강세 코인만 선별 진입")
+            print("⚠️ 극약세 시장 → 모멘텀 기준만 올려서 진입 계속")
 
         # v5.8: 시간대별 모멘텀 기준 강화 (DB 승률 데이터 기반)
         # 심야(23~06): -246k 누적, 저녁(18~23): -58k, 오전(8~13): 8~10% 승률
