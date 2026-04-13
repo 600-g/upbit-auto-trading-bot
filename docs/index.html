@@ -258,9 +258,10 @@ function render(d) {
     </div>`;
   }
 
-  // 일 목표 프로그레스 (잔고 × 5% — 복리)
-  const baseBalance = (d.balance || 10000000) - (d.today_pnl || 0);  // 오늘 시작 시점 잔고
-  const goalAmt = Math.round(baseBalance * 0.05);
+  // 일 목표 프로그레스 (월초 시드 × 5%, 고정)
+  // 복리는 월 단위로 적용 (다음 달 시작 시 시드 갱신)
+  const monthlySeed = d.monthly_seed || 10000000;
+  const goalAmt = Math.round(monthlySeed * 0.05);
   const todayPnl = d.today_pnl || 0;
   const goalPct = Math.min(Math.max(todayPnl / goalAmt * 100, -100), 150);
   const goalColor = todayPnl >= 0 ? 'positive' : 'negative';
