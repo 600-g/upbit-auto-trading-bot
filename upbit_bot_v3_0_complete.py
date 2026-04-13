@@ -155,7 +155,7 @@ class TradingBotV3:
         # v4.3: 과매매 방지
         self._daily_coin_buys = {}     # {coin: count} 코인별 일일 매수 횟수
         self._daily_reset_date = None  # 마지막 리셋 날짜
-        self._max_daily_coin_buys = 2  # v5.2: 같은 코인 하루 최대 2회 (재진입 손실 방지)
+        self._max_daily_coin_buys = 4  # v7.4: 2→4 (데이터 축적)
         self._daily_coin_losses = {}   # v5.24: {coin: loss_count} 당일 패배 카운터
         self._coin_loss_history = {}   # v6.4: {coin: [(date, loss_count)]} 3일 블랙리스트
         self._max_batch = 4            # 추가매수 최대 batch_4까지
@@ -3150,8 +3150,8 @@ class TradingBotV3:
     # 3. 자동 매수/매도
     # ============================================
     
-    MAX_POSITIONS = 3  # v5.28: 2→3슬롯 (거래 빈도+분산, 20분 타임아웃으로 회전 빠름)
-    MAX_POSITIONS_BOOST = 4  # v5.22: AI 확신 시 최대 4슬롯
+    MAX_POSITIONS = 5  # v7.4: 3→5슬롯 (데이터 축적 속도 우선, 베타)
+    MAX_POSITIONS_BOOST = 7  # v7.4: 4→7 (AI 확신 시)
 
     # 코인 섹터 분류 (동일 섹터 집중 방지)
     COIN_SECTORS = {
@@ -3489,11 +3489,9 @@ class TradingBotV3:
         else:
             self._ai_lesson_adj = {}
 
-        # v5.15: 심야(23~06시) 신규 매수 플래그 (포지션 관리는 유지)
+        # v7.4: 심야 차단 해제 (베타 24시간 운영, 데이터 축적)
         _cur_hour_cycle = datetime.now().hour
-        self._nighttime_no_buy = (_cur_hour_cycle >= 23 or _cur_hour_cycle < 6)
-        if self._nighttime_no_buy:
-            print(f"🌙 심야({_cur_hour_cycle:02d}시) → 포지션 관리만, 신규 매수 차단")
+        self._nighttime_no_buy = False  # 전 시간대 매매 허용
 
         # v5.8: 9시(09:00-09:59) 신규 매수 금지 (백테스트 기반 — 개장 변동성 회피)
         self._morning_no_buy = (_cur_hour_cycle == 9)
@@ -3674,12 +3672,12 @@ class TradingBotV3:
         # v5.8: 시간대별 모멘텀 기준 강화 (DB 승률 데이터 기반)
         # 심야(23~06): -246k 누적, 저녁(18~23): -58k, 오전(8~13): 8~10% 승률
         _cur_hour = datetime.now().hour
+        # v7.4: 심야 스캔 차단 해제 (베타 24시간 운영)
         if _cur_hour >= 23 or _cur_hour < 6:
-            # v5.15: 심야 차단은 place_buy_order에서 처리, 여기서도 코인 스캔 생략
-            print(f"🌙 심야({_cur_hour:02d}시) → 코인 스캔/진입 생략 (포지션 관리만)")
-            return
+            min_score += 10  # 심야는 기준 강화만, 차단은 하지 않음
+            print(f"🌙 심야({_cur_hour:02d}시) → 모멘텀 기준 강화: {min_score}점 (스캔 유지)")
         elif _cur_hour >= 21:
-            min_score += 8  # v6.1: 21시+ 강력 방어 (데이터: 21시 8건 -11.7만)
+            min_score += 8
             print(f"🌙 야간({_cur_hour:02d}시) → 모멘텀 기준: {min_score}점")
         elif _cur_hour >= 18:
             min_score += 3  # 저녁: 약간 강화
@@ -3745,7 +3743,7 @@ class TradingBotV3:
                     _dynamic_cd = 300   # 쿨다운 +5분 (방어)
             except Exception:
                 pass
-            _entry_cooldown = max(180, 480 + _ai_cooldown_boost + _dynamic_cd)  # 최소 3분
+            _entry_cooldown = max(60, 300 + _ai_cooldown_boost + _dynamic_cd)  # v7.4: 최소 1분, 기본 5분
             _last_entry = getattr(self, '_last_new_entry_time', 0)
             if time.time() - _last_entry < _entry_cooldown:
                 _remaining_cool = int((_entry_cooldown - (time.time() - _last_entry)) / 60)
