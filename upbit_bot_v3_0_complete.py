@@ -5466,12 +5466,15 @@ class TradingBotV3:
                     # v5.19: 트레일링 추가 확대 (데이터: 수익 21%가 조기매도, 평균 +1.86% 놓침)
                     # GLM +0.89%→+7.14%, ORDER +1.92%→+3.95%, G +2.72%→+5.76%
                     if momentum >= 70:
-                        if current_peak >= 0.05:
-                            trail_drop = 0.012   # +5% 고점: -1.2%
+                        # v7.6: 큰 수익 기회 확보 — 월평균 5% 위해 +7~10% 대박 놓치지 말 것
+                        if current_peak >= 0.10:
+                            trail_drop = 0.015   # +10%+ 고점: -1.5% (보호)
+                        elif current_peak >= 0.05:
+                            trail_drop = 0.020   # +5% 고점: -2.0% (더 넓게, 대박 추적)
                         elif current_peak >= 0.03:
-                            trail_drop = 0.015   # +3% 고점: -1.5%
+                            trail_drop = 0.020   # +3% 고점: -2.0% (너무 일찍 끊지 않기)
                         else:
-                            trail_drop = 0.018   # 초기 상승: -1.8% (넓게 잡아 큰 수익 기회)
+                            trail_drop = 0.022   # 초기: -2.2% (큰 파동 기회 확보)
                     elif momentum >= 50:
                         if current_peak >= 0.03:
                             trail_drop = 0.015   # +3%: -1.5%
