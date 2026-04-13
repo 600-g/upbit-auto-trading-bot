@@ -245,6 +245,8 @@ class DebateAgent:
     def _build_sell_prompt(self, coin, indicators):
         return f"""암호화폐 {coin} 매도 타이밍을 판단하세요.
 
+⚠️ 할루시네이션 방지: 아래 숫자 외엔 어떤 수치도 만들지 마시오. 근거 불명 시 verdict="hold".
+
 현재 상태:
 - 수익률: {indicators.get('profit_rate', 0)*100:+.2f}%
 - 고점 수익률: {indicators.get('peak_rate', 0)*100:+.2f}%
@@ -286,6 +288,8 @@ class DebateAgent:
         market = indicators.get('market_state', '보통')
         fear_greed = indicators.get('fear_greed', '?')
         coin_record = indicators.get('coin_record', '')
+        # v7.5: 할루시네이션 방지용 검증 토큰 (응답에 실제 숫자 인용 강제)
+        self._last_indicators = {'rsi': rsi, 'vol': vol, 'momentum': momentum, 'fg': fear_greed}
 
         # 과거 교훈
         lesson_str = ""
@@ -297,8 +301,14 @@ class DebateAgent:
 
         return f"""당신은 암호화폐 투자 분석 팀입니다. 3명의 전문가가 매수 판단을 토론합니다.
 
+⚠️ 절대 규칙 (할루시네이션 방지):
+1. 아래 제공된 숫자 외엔 어떤 수치도 만들어내지 마시오
+2. 확실하지 않은 건 confidence를 0.3 이하로 낮추시오
+3. 근거 없는 추측 시 verdict는 "skip"
+4. 응답에 반드시 RSI={rsi}, 모멘텀={momentum}점 숫자를 인용하시오
+
 코인: {coin}
-현재 지표:
+현재 지표 (이것만 사용):
 - RSI: {rsi}
 - 거래량 점수: {vol}
 - 모멘텀: {momentum}점
@@ -329,12 +339,34 @@ class DebateAgent:
             if match:
                 data = json.loads(match.group())
                 severity = int(data.get('bear_severity', 0))
+                confidence = float(data.get('confidence', 0.5))
+
+                # v7.5: 할루시네이션 검증 — 실제 지표 숫자를 인용했는지 확인
+                ind = getattr(self, '_last_indicators', {})
+                text = (data.get('bull', '') + ' ' + data.get('bear', '') + ' ' + data.get('rebuttal', '') + ' ' + data.get('summary', ''))
+                grounded = False
+                try:
+                    rsi_val = ind.get('rsi', '')
+                    mom_val = ind.get('momentum', '')
+                    if rsi_val and str(int(float(rsi_val))) in text:
+                        grounded = True
+                    if mom_val and str(int(float(mom_val))) in text:
+                        grounded = True
+                except Exception:
+                    grounded = True  # 지표 없으면 검증 스킵
+
+                if not grounded and confidence >= 0.5:
+                    # 실제 숫자 인용 없음 → 할루시네이션 의심, confidence 강제 하향
+                    confidence = 0.3
+                    severity = max(severity, 5)
+                    print(f"⚠️ [AI 할루시네이션] 응답에 지표 숫자 인용 없음 → confidence 하향")
+
                 return {
-                    'verdict': data.get('verdict', 'buy'),
-                    'confidence': float(data.get('confidence', 0.5)),
+                    'verdict': data.get('verdict', 'skip'),
+                    'confidence': confidence,
                     'bear_severity': severity,
                     'summary': data.get('summary', ''),
-                    'should_block': severity >= 7,
+                    'should_block': severity >= 7 or confidence < 0.4,  # v7.5: 저신뢰도도 차단
                     'ratio': int(data.get('ratio', 100)),
                     'stop_loss': float(data.get('stop_loss', -5)),
                     'target': [float(data.get('target_1', 3)), float(data.get('target_2', 5))],
@@ -342,13 +374,15 @@ class DebateAgent:
                     'bull': data.get('bull', ''),
                     'bear': data.get('bear', ''),
                     'rebuttal': data.get('rebuttal', ''),
+                    'grounded': grounded,
                 }
         except Exception:
             pass
+        # v7.5: 파싱 실패 시 안전 차단 (기존: 허용 → 차단)
         return {
-            'verdict': 'buy', 'confidence': 0.5, 'bear_severity': 0,
-            'summary': '파싱 실패', 'should_block': False,
-            'ratio': 100, 'stop_loss': -5, 'target': [3, 5], 'risk': '미확인'
+            'verdict': 'skip', 'confidence': 0.0, 'bear_severity': 10,
+            'summary': '파싱 실패 → 안전 차단', 'should_block': True,
+            'ratio': 0, 'stop_loss': -5, 'target': [3, 5], 'risk': '미확인'
         }
 
 
