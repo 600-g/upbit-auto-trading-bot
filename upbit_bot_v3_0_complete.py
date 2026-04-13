@@ -3672,7 +3672,7 @@ class TradingBotV3:
         # v6.0: 상대적 모멘텀 기준 (백분위 방식)
         # 시장 전체가 죽어있으면 절대 기준(22점)은 의미 없음
         # → 현재 스캔 분포의 상위 N%를 기준으로 진입 여부 결정
-        ABSOLUTE_FLOOR = 15  # v6.1: 12→15 (v6.0 데이터: 12~15점 승률 20% 전패급)
+        ABSOLUTE_FLOOR = 10  # v7.8: 15→10 (적극 매매, 데이터 축적 우선; 손절 안전망 의존)
         all_scores = sorted(self._last_scan_scores.values(), reverse=True) if self._last_scan_scores else []
 
         if all_scores and len(all_scores) >= 10:

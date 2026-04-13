@@ -301,11 +301,12 @@ class DebateAgent:
 
         return f"""당신은 암호화폐 투자 분석 팀입니다. 3명의 전문가가 매수 판단을 토론합니다.
 
-⚠️ 절대 규칙 (할루시네이션 방지):
-1. 아래 제공된 숫자 외엔 어떤 수치도 만들어내지 마시오
-2. 확실하지 않은 건 confidence를 0.3 이하로 낮추시오
-3. 근거 없는 추측 시 verdict는 "skip"
-4. 응답에 반드시 RSI={rsi}, 모멘텀={momentum}점 숫자를 인용하시오
+⚠️ 규칙:
+1. 아래 제공된 숫자 외엔 어떤 수치도 만들지 마시오
+2. RSI=0 또는 거래량=0은 "데이터 0"이 아니라 "지표 미수신"입니다 → 불충분 사유로 차단하지 마시오
+3. 모멘텀 점수만으로도 판단 가능 — 모멘텀이 진입 기준 통과했으면 1차 검증 끝남
+4. 본 토론은 "이 진입의 추가 리스크가 심각한가"만 판정 (severity 8+ = 치명적 리스크)
+5. 어중간(severity 4~7)은 매수 허용
 
 코인: {coin}
 현재 지표 (이것만 사용):
@@ -355,18 +356,17 @@ class DebateAgent:
                 except Exception:
                     grounded = True  # 지표 없으면 검증 스킵
 
-                if not grounded and confidence >= 0.5:
-                    # 실제 숫자 인용 없음 → 할루시네이션 의심, confidence 강제 하향
-                    confidence = 0.3
-                    severity = max(severity, 5)
-                    print(f"⚠️ [AI 할루시네이션] 응답에 지표 숫자 인용 없음 → confidence 하향")
+                # v7.8: 할루시네이션 검증 완화 — 차단까진 안 가게 (적극 매매 모드)
+                if not grounded and confidence >= 0.7:
+                    confidence = max(0.5, confidence - 0.2)  # 강한 하향만, 차단은 X
+                    print(f"⚠️ [AI] 지표 인용 없음 → confidence 약간 하향")
 
                 return {
                     'verdict': data.get('verdict', 'skip'),
                     'confidence': confidence,
                     'bear_severity': severity,
                     'summary': data.get('summary', ''),
-                    'should_block': severity >= 7 or confidence < 0.4,  # v7.5: 저신뢰도도 차단
+                    'should_block': severity >= 8,  # v7.8: 7→8 (차단 임계 완화), confidence 무관
                     'ratio': int(data.get('ratio', 100)),
                     'stop_loss': float(data.get('stop_loss', -5)),
                     'target': [float(data.get('target_1', 3)), float(data.get('target_2', 5))],
@@ -378,11 +378,12 @@ class DebateAgent:
                 }
         except Exception:
             pass
-        # v7.5: 파싱 실패 시 안전 차단 (기존: 허용 → 차단)
+        # v7.8: 파싱 실패 시 통과 (적극 매매, 데이터 축적 우선)
+        # 손절 -0.7%/-3% 안전망이 있으므로 OK
         return {
-            'verdict': 'skip', 'confidence': 0.0, 'bear_severity': 10,
-            'summary': '파싱 실패 → 안전 차단', 'should_block': True,
-            'ratio': 0, 'stop_loss': -5, 'target': [3, 5], 'risk': '미확인'
+            'verdict': 'buy', 'confidence': 0.5, 'bear_severity': 0,
+            'summary': '파싱 실패 → 기본 통과', 'should_block': False,
+            'ratio': 100, 'stop_loss': -5, 'target': [3, 5], 'risk': '중간'
         }
 
 
