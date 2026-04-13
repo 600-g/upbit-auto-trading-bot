@@ -162,7 +162,7 @@ class TradingBotV3:
 
         # v4.4: 자동 학습 시스템 (Auto-Tune)
         self._autotune_enabled = True
-        self._autotune_interval = 3600   # v5.4: 1시간 간격 분석
+        self._autotune_interval = 900    # v7.3: 1시간 → 15분 (공격적 자가개선, 데모 베타)
         self._last_autotune = 0
         self._autotune_rules = []        # 현재 활성 규칙 캐시
         self._autotune_blacklist = set() # 블랙리스트 캐시 (빠른 조회용)
@@ -2810,8 +2810,8 @@ class TradingBotV3:
     def _backtest_and_improve(self):
         """백테스트 기반 파라미터 자동 최적화"""
         trades = self._backtest_load_trades(days=14)
-        if len(trades) < 20:
-            print(f"🧪 [백테스트] 거래 {len(trades)}건 — 최소 15건 필요, 스킵")
+        if len(trades) < 10:  # v7.3: 20 → 10 (빠른 피드백)
+            print(f"🧪 [백테스트] 거래 {len(trades)}건 — 최소 10건 필요, 스킵")
             return
 
         # 현재 P&L (기준선)
@@ -2942,8 +2942,8 @@ class TradingBotV3:
         pnl_improve = best_result['pnl'] - current_pnl
         wr_improve = best_result['win_rate'] - current_wr
 
-        # 최소 개선 기준: P&L 5% 이상 또는 절대 5만원 이상
-        min_improve = max(abs(current_pnl) * 0.05, 50000)
+        # v7.3: 최소 개선 기준 완화 (5만 → 1만, 데모 베타 공격적 개선)
+        min_improve = max(abs(current_pnl) * 0.03, 10000)
         if pnl_improve < min_improve:
             print(f"🧪 [백테스트] 최적안 {best_label}: +{pnl_improve:,.0f}원 (기준 {min_improve:,.0f}원 미달) → 유보")
             return
@@ -3733,9 +3733,19 @@ class TradingBotV3:
             if remaining_slots <= 0:
                 break
 
-            # v7.0: 신규 진입 쿨타임 8분 (5분→8분, 거래 빈도 억제로 수수료 절감)
+            # v7.3: 동적 쿨다운 — R:R 좋으면 거래량 증대, 나쁘면 억제
             _ai_cooldown_boost = getattr(self, '_ai_lesson_adj', {}).get('cooldown_boost', 0)
-            _entry_cooldown = 480 + _ai_cooldown_boost  # 기본 8분 + AI 교훈 추가
+            # 최근 성과 기반 동적 조정 (오늘 P&L > 0 → 쿨다운 -50%, P&L < -3만 → +100%)
+            _dynamic_cd = 0
+            try:
+                today_pnl = sum(t.get('profit', 0) for t in self.trades[-30:] if t.get('profit'))
+                if today_pnl > 0:
+                    _dynamic_cd = -180  # 쿨다운 -3분 (거래량 확대)
+                elif today_pnl < -30000:
+                    _dynamic_cd = 300   # 쿨다운 +5분 (방어)
+            except Exception:
+                pass
+            _entry_cooldown = max(180, 480 + _ai_cooldown_boost + _dynamic_cd)  # 최소 3분
             _last_entry = getattr(self, '_last_new_entry_time', 0)
             if time.time() - _last_entry < _entry_cooldown:
                 _remaining_cool = int((_entry_cooldown - (time.time() - _last_entry)) / 60)
