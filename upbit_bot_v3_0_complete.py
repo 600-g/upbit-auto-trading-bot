@@ -2472,7 +2472,29 @@ class TradingBotV3:
                 for batch, cnt, wins_b, pnl_b in batch_stats:
                     wins_b = wins_b or 0
                     wr_b = wins_b/cnt*100
-                    print(f"   {batch}: {cnt}건 승률{wr_b:.0f}% PnL{pnl_b or 0:+,.0f}원")
+                    pnl_b = pnl_b or 0
+                    print(f"   {batch}: {cnt}건 승률{wr_b:.0f}% PnL{pnl_b:+,.0f}원")
+
+                    # v7.9.2: 자율 감지 — 특정 배치가 적자 누적이면 자동 규칙 추가
+                    # SURGE 6건+ 승률 30% 미만 & 손실 3만원+ → 진입 기준 자동 강화
+                    if batch == 'surge_trade' and cnt >= 5 and wr_b < 30 and pnl_b < -30000:
+                        rules.append({
+                            'rule_type': 'surge_tighten',
+                            'coin': None,
+                            'param_key': 'vol_ratio_min',
+                            'param_value': 3.5,
+                            'reason': f'SURGE 자율 감지: {cnt}건 승률{wr_b:.0f}% PnL{pnl_b:+,.0f} → 진입 기준 강화'
+                        })
+                        print(f"🤖 [자율감지] SURGE 적자 누적 → 진입 기준 자동 상향 예약")
+                    if batch == 'batch_2' and cnt >= 3 and wr_b < 30 and pnl_b < -20000:
+                        rules.append({
+                            'rule_type': 'batch2_pause',
+                            'coin': None,
+                            'param_key': 'pause',
+                            'param_value': 1,
+                            'reason': f'batch_2 자율 감지: {cnt}건 승률{wr_b:.0f}% → 일시중지'
+                        })
+                        print(f"🤖 [자율감지] batch_2 적자 누적 → 일시중지 예약")
             except:
                 pass
 
@@ -4711,12 +4733,12 @@ class TradingBotV3:
                     avg_vol = np.mean(volumes[:-2]) if len(volumes) > 2 else np.mean(volumes)
                     recent_vol = np.mean(volumes[-2:])
                     vol_ratio = recent_vol / avg_vol if avg_vol > 0 else 0
-                    if vol_ratio < 2.0:
+                    if vol_ratio < 3.0:  # v7.9.2: 2.0→3.0 (SURGE 적자 원인, 질 상향)
                         continue
 
                     # ── 조건3: 타이밍 — 10분 내 +2% 이상? ──
                     price_chg_10m = (closes[-1] - closes[-3]) / closes[-3] if len(closes) >= 3 else 0
-                    if price_chg_10m < 0.02:
+                    if price_chg_10m < 0.035:  # v7.9.2: 2%→3.5% (고점 추격 방지)
                         continue
 
                     # ── 안전 필터 (최소한만) ──
@@ -4997,10 +5019,9 @@ class TradingBotV3:
 
                 # v5.29: surge 매도 — 손절 최우선, 홀딩은 수익 구간만
                 #
-                # ★ 1순위: 손절 (시간 무관, 무조건 최우선)
-                # -0.7% 이하면 즉시 컷 — 유예 없음
-                # (데이터: 0-3분 손절 34건 -120만원, 거래량 유예가 -5.26% 방치 원인)
-                elif profit_rate <= -0.007:
+                # v7.9.2: SURGE 손절 -0.5% (슬리피지 감안, 데이터 -1~2% 체결 현실)
+                # 기존 -0.7% → -0.5%: 시장가 매도 슬리피지 고려한 더 빠른 컷
+                elif profit_rate <= -0.005:
                     sell_reason = f"손절 {profit_rate*100:+.2f}%"
 
                 # ★ 2순위: 5분 미만 홀딩 (손실 아닌 경우만)
