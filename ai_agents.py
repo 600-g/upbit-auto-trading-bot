@@ -360,6 +360,36 @@ JSON (필수):
                     confidence = max(0.5, confidence - 0.2)  # 강한 하향만, 차단은 X
                     print(f"⚠️ [AI] 지표 인용 없음 → confidence 약간 하향")
 
+                # v8.0: 5인 투표 가중치 반영 — 성과 좋은 트레이더 가중치 ↑
+                votes = data.get('votes', {})
+                if votes and isinstance(votes, dict):
+                    weights = getattr(self, '_trader_weights_cache', None)
+                    if weights is None:
+                        try:
+                            from threading import Thread
+                            # 캐시 없으면 기본 동일 가중치
+                            weights = {}
+                        except Exception:
+                            weights = {}
+                    # 가중 투표 계산
+                    buy_weight = 0.0
+                    skip_weight = 0.0
+                    for trader, vote in votes.items():
+                        w = weights.get(trader, 0.5) if weights else 0.5
+                        w = max(0.1, w)  # 최소 가중치 (배수진: 완전 해고는 아님, 약화)
+                        if vote == 'buy':
+                            buy_weight += w
+                        else:
+                            skip_weight += w
+                    # 기존 verdict 재검토
+                    if buy_weight >= skip_weight * 1.2:
+                        data['verdict'] = 'buy'
+                        severity = min(severity, 5)
+                    elif skip_weight > buy_weight * 1.5:
+                        data['verdict'] = 'skip'
+                        severity = max(severity, 7)
+                    self._last_votes = votes  # 나중에 성과 추적용
+
                 return {
                     'verdict': data.get('verdict', 'skip'),
                     'confidence': confidence,
@@ -446,9 +476,19 @@ class AIAgents:
             print(f"⚠️ [AI] DB 테이블 생성 실패: {e}")
 
     def reflect_async(self, trade_data):
-        """매도 후 비동기 반성 (fire-and-forget)"""
+        """매도 후 비동기 반성 (fire-and-forget) + v8.0: 트레이더 성과 추적"""
         if not self.enabled or not self.reflection:
             return
+
+        # v8.0: 이 코인의 마지막 투표 기록과 결과 매칭
+        votes = getattr(self.debate, '_last_votes', None) if self.debate else None
+        if votes:
+            self.track_trader_performance(trade_data, votes)
+            # 가중치 캐시 갱신
+            try:
+                self.debate._trader_weights_cache = self.get_trader_weights()
+            except Exception:
+                pass
 
         def _do_reflect():
             try:
@@ -570,6 +610,48 @@ class AIAgents:
             return True, improve, f'개선 예상 (+{improve:,.0f}원)'
         except Exception as e:
             return True, 0, f'검증 오류 → 적용: {e}'
+
+    def track_trader_performance(self, trade_data, vote_info):
+        """v8.0: 5인 트레이더 각자의 투표 결과 추적 → 성과 기반 가중치
+        vote_info = {'김트레이드':'buy', '이퀀트':'skip', ...}
+        trade_data에는 profit_rate 포함"""
+        if not vote_info:
+            return
+        try:
+            with self.db_lock:
+                conn = sqlite3.connect(self.db_path)
+                conn.execute("""CREATE TABLE IF NOT EXISTS trader_votes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trader TEXT, vote TEXT, coin TEXT,
+                    profit_rate REAL, created_at TEXT)""")
+                for trader, vote in vote_info.items():
+                    conn.execute("INSERT INTO trader_votes (trader, vote, coin, profit_rate, created_at) VALUES (?,?,?,?,?)",
+                                 (trader, vote, trade_data.get('coin', ''), trade_data.get('profit_rate', 0), datetime.now().isoformat()))
+                conn.commit()
+                conn.close()
+        except Exception as e:
+            print(f"⚠️ [트레이더 추적] {e}")
+
+    def get_trader_weights(self):
+        """v8.0: 각 트레이더 예측 정확도 → 가중치 (배수진: 못 맞히면 해고)"""
+        try:
+            with self.db_lock:
+                conn = sqlite3.connect(self.db_path)
+                rows = conn.execute("""
+                    SELECT trader,
+                      SUM(CASE WHEN (vote='buy' AND profit_rate>0) OR (vote='skip' AND profit_rate<=0) THEN 1 ELSE 0 END) correct,
+                      COUNT(*) total
+                    FROM trader_votes WHERE created_at >= datetime('now','-2 days')
+                    GROUP BY trader""").fetchall()
+                conn.close()
+            weights = {}
+            for trader, correct, total in rows:
+                if total >= 5:
+                    acc = correct / total
+                    weights[trader] = round(acc, 2)
+            return weights
+        except Exception:
+            return {}
 
     def daily_socratic_review(self):
         """v7.9: 하루 단위 거래 묶어서 소크라테스식 통합 복기 → 메타 교훈 도출

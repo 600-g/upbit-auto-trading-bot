@@ -162,7 +162,7 @@ class TradingBotV3:
 
         # v4.4: 자동 학습 시스템 (Auto-Tune)
         self._autotune_enabled = True
-        self._autotune_interval = 900    # v7.3: 1시간 → 15분 (공격적 자가개선, 데모 베타)
+        self._autotune_interval = 600    # v8.0: 15분 → 10분 (배수진 모드)
         self._last_autotune = 0
         self._autotune_rules = []        # 현재 활성 규칙 캐시
         self._autotune_blacklist = set() # 블랙리스트 캐시 (빠른 조회용)
@@ -2201,34 +2201,42 @@ class TradingBotV3:
             return ("조회실패", 0)
 
     def check_market_strength(self):
-        """시장 전체 강도 (v3.2: 약세장에서도 수익 내는 봇)
-        - 강세장은 누구나 번다 → 기준 낮게
-        - 약세장이 진짜 실력 → 기준을 높이지 않고 선별력으로 승부
-        - 극약세만 소폭 방어, 나머지는 적극 진입
-        """
+        """v8.0: BTC-ALT 다이버전스 감지 추가"""
         try:
-            scores = []
-            for coin in ["BTC", "ETH", "XRP"]:
-                ticker = f"KRW-{coin}"
-                ohlcv = pyupbit.get_ohlcv(ticker, interval="minute60", count=24)
-                closes = [x for x in ohlcv['close']]
-                change = (closes[-1] - closes[0]) / closes[0]
-                scores.append(change)
+            btc_ohlcv = pyupbit.get_ohlcv("KRW-BTC", interval="minute60", count=24)
+            btc_chg = (btc_ohlcv['close'].iloc[-1] - btc_ohlcv['close'].iloc[0]) / btc_ohlcv['close'].iloc[0]
 
-            avg = np.mean(scores) if scores else 0
+            alt_scores = []
+            for coin in ["ETH", "XRP", "SOL", "ADA"]:
+                try:
+                    oh = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute60", count=24)
+                    alt_scores.append((oh['close'].iloc[-1] - oh['close'].iloc[0]) / oh['close'].iloc[0])
+                except Exception:
+                    pass
+            alt_avg = np.mean(alt_scores) if alt_scores else 0
+            divergence = btc_chg - alt_avg
 
-            # v5.4: 기준 현실화 — 극공포장에서 모멘텀 TOP 25점대인 현실 반영
-            # AutoTune threshold_adjust는 악순환 유발하므로 적용 안함
+            # 다이버전스 캐시 (다른 곳에서 사용)
+            self._btc_alt_divergence = divergence
+            self._btc_chg_24h = btc_chg
+            self._alt_chg_24h = alt_avg
+
+            # v8.0: BTC 단독 강세 + ALT 약세 = 알트 매매 불리 국면 감지
+            if btc_chg > 0 and alt_avg < -0.02 and divergence > 0.03:
+                print(f"⚠️ [다이버전스] BTC +{btc_chg*100:.1f}% / ALT {alt_avg*100:+.1f}% → 알트 불리")
+                return "알트약세", 26  # 진입 기준 상향
+
+            avg = (btc_chg * 0.5 + alt_avg * 0.5)
             if avg < -0.15:
-                return "극약세", 30     # 폭락장: 30점 이상만
+                return "극약세", 30
             elif avg < -0.10:
-                return "심약세", 28     # 심약세: 28점
+                return "심약세", 28
             elif avg < -0.05:
-                return "약세", 25       # 약세: 25점
+                return "약세", 25
             elif avg < 0.03:
-                return "보통", 22       # 평시: 적극 진입
+                return "보통", 22
             else:
-                return "강세", 18       # 강세: 공격적
+                return "강세", 18
         except Exception as _e:
             print(f"⚠️ 시장 강도 체크 오류: {_e}")
             return "보통", 22
