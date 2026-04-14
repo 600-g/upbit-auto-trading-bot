@@ -3557,21 +3557,19 @@ class TradingBotV3:
                         if current_price:
                             price_drop = (current_price - batch1_pos['buy_price']) / batch1_pos['buy_price']
 
-                            # v7.1: 1차 손실 -0.3% 이상이면 취소 (타이트)
-                            # 데이터: batch_2 7건 -21k 손실, -0.5% 기준 너무 느슨함
-                            if price_drop <= -0.003:
-                                print(f"🚫 {coin} 2차 매수 취소: 1차 손실 {price_drop*100:+.2f}% ≤ -0.3% (추가 손실 방지)")
-                                del self._pending_2nd_buy[coin]
-                                continue
-
-                            # 조건1: 현재가 < 1차 매수가 (진짜 물타기만) — 단 -0.1% 이상 하락했을 때만
-                            if price_drop >= -0.001:
+                            # v7.9.1: 물타기 의미 있는 구간만 = -0.3% ~ -1.5% 1차 손실
+                            # -0.3% 미만: 물타기 불필요 (그냥 정배 익절 기다리기)
+                            # -1.5% 초과: 추세 붕괴 의심 → 손절 영역, 물타기 X
+                            if price_drop > -0.003:
                                 if elapsed_min >= 20:
-                                    print(f"🚫 {coin} 2차 매수 포기: 20분 경과 + 하락폭 미미 ({price_drop*100:+.2f}%)")
+                                    print(f"🚫 {coin} 2차 포기: 하락폭 미미 {price_drop*100:+.2f}% (물타기 불필요)")
                                     del self._pending_2nd_buy[coin]
                                 else:
-                                    print(f"⏳ {coin} 2차 대기: 하락폭 미미 ({price_drop*100:+.2f}%) | 모멘텀 {mom_2nd}점 | {elapsed_min:.0f}분/{20}분")
                                     entry['time'] = time.time()
+                                continue
+                            if price_drop <= -0.015:
+                                print(f"🚫 {coin} 2차 취소: 1차 -{abs(price_drop)*100:.1f}% 추세 붕괴 의심")
+                                del self._pending_2nd_buy[coin]
                                 continue
 
                             # 조건2: 모멘텀 ≥ 1차 - 5 (v7.1: -10 → -5 강화)
@@ -3584,13 +3582,17 @@ class TradingBotV3:
                                     entry['time'] = time.time()
                                 continue
 
-                            # v7.1: 조건3 — 반등 신호 필수 (최근 3분봉 마지막 양봉)
+                            # v7.9.1: 조건3 — 반등 확실성 (최근 3분봉 중 2개+ 양봉 OR 저가 대비 반등)
                             try:
                                 _rebound_ok = False
-                                _1m = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute1", count=3)
+                                _1m = pyupbit.get_ohlcv(f"KRW-{coin}", interval="minute1", count=5)
                                 if _1m is not None and len(_1m) >= 3:
-                                    last = _1m.iloc[-1]
-                                    if last['close'] > last['open']:  # 마지막 1분봉 양봉
+                                    last3 = _1m.tail(3)
+                                    bull_count = sum(1 for _, r in last3.iterrows() if r['close'] > r['open'])
+                                    # 양봉 2개+ OR 최근 5분 저가 대비 현재가 0.3%+ 반등
+                                    low5 = _1m['low'].min()
+                                    rebound_pct = (current_price - low5) / low5 if low5 else 0
+                                    if bull_count >= 2 or rebound_pct >= 0.003:
                                         _rebound_ok = True
                                 if not _rebound_ok:
                                     if elapsed_min >= 20:
@@ -3603,10 +3605,10 @@ class TradingBotV3:
                             except Exception:
                                 pass
 
-                            # v7.1: 조건4 — 거래량 살아있어야 함 (점수 40+)
+                            # v7.9.1: 조건4 — 거래량 회복 확인 (점수 50+)
                             try:
                                 _vol_2nd = self.analyze_volume(coin)
-                                if _vol_2nd < 40:
+                                if _vol_2nd < 50:
                                     if elapsed_min >= 20:
                                         print(f"🚫 {coin} 2차 매수 포기: 거래량 부족 ({_vol_2nd}점 < 40)")
                                         del self._pending_2nd_buy[coin]
@@ -4068,11 +4070,17 @@ class TradingBotV3:
                 if getattr(self, '_strong_half_budget', False) and coin_is_strong:
                     coin_budget = coin_budget // 2
                     self._strong_half_budget = False
-                # v7.9: 과감 모드 — 1차 풀 투입 (물타기는 진짜 기회 때만 따로)
+                # v7.9.1: 모멘텀 기반 동적 비율 (물타기 살림)
+                # - 고모멘텀: 확신 있으니 1차 크게, 2차 작게
+                # - 저/중모멘텀: 1차 보수, 2차로 물타기 여지 확보
                 if is_concentrate:
-                    buy_amount = int(coin_budget * 0.5)
+                    buy_amount = int(coin_budget * 0.5)  # 집중은 기존 유지 (3차까지)
+                elif momentum >= 60:
+                    buy_amount = int(coin_budget * 0.75)  # 고모멘텀: 1차 75% + 2차 25%
+                elif momentum >= 40:
+                    buy_amount = int(coin_budget * 0.6)   # 중모멘텀: 1차 60% + 2차 40%
                 else:
-                    buy_amount = int(coin_budget * 1.0)  # 100% 투입
+                    buy_amount = int(coin_budget * 0.5)   # 저모멘텀: 1차 50% + 2차 50% (물타기 여지)
                 if buy_amount < 5000:
                     print(f" 💸 매수금액 부족 ({buy_amount:,}원) → 패스")
                     continue
