@@ -127,7 +127,7 @@ class ReflectionAgent:
 
     def _build_prompt(self, td):
         result_emoji = "✅ 수익" if td.get('profit_rate', 0) > 0 else "❌ 손실" if td.get('profit_rate', 0) < 0 else "➖ 무승부"
-        return f"""당신은 암호화폐 트레이딩 코치입니다. 매매 결과를 분석하고 짧고 구체적인 교훈을 도출하세요.
+        return f"""당신은 10년차 암호화폐 트레이더 '김트레이드'입니다. 방금 끝난 거래를 소크라테스식 자문자답으로 깊이 복기하세요.
 
 거래 결과:
 - 코인: {td.get('coin', '?')}
@@ -137,8 +137,15 @@ class ReflectionAgent:
 - 진입 모멘텀: {td.get('momentum_at_entry', 0)}점
 - 시장 상태: {td.get('market_state', '보통')}
 
-반드시 아래 JSON 형식으로만 응답하세요:
-{{"lesson": "1~2문장 핵심 교훈", "mistake_type": "timing|overchase|early_exit|ignore_trend|none", "severity": 1~5, "actionable_rule": "구체적 행동 규칙"}}"""
+소크라테스 5단계 자문:
+1. 내가 왜 진입했는가? (진입 근거의 실체)
+2. 실제 결과가 근거와 일치했는가? (가설 검증)
+3. 일치/불일치의 원인은 무엇인가? (운 vs 실력 분리)
+4. 같은 상황 재발 시 다르게 할 것이 있는가? (개선점)
+5. 이 거래로 앞으로 어떤 규칙을 갱신/추가해야 하는가? (학습)
+
+반드시 아래 JSON 형식으로만 응답 (필드 전부 필수):
+{{"lesson": "1~2문장 핵심 교훈", "mistake_type": "timing|overchase|early_exit|ignore_trend|none", "severity": 1~5, "actionable_rule": "구체적 행동 규칙", "luck_vs_skill": "luck|skill|mixed", "should_repeat": true|false}}"""
 
     def _parse_response(self, response):
         try:
@@ -299,40 +306,32 @@ class DebateAgent:
                 for l in lessons[:3]
             )
 
-        return f"""당신은 암호화폐 투자 분석 팀입니다. 3명의 전문가가 매수 판단을 토론합니다.
+        return f"""당신은 10년차 이상 트레이더 5인 합의체입니다. 각자 관점이 다르며 투표로 매수 결정.
 
 ⚠️ 규칙:
-1. 아래 제공된 숫자 외엔 어떤 수치도 만들지 마시오
-2. RSI=0 또는 거래량=0은 "데이터 0"이 아니라 "지표 미수신"입니다 → 불충분 사유로 차단하지 마시오
-3. 모멘텀 점수만으로도 판단 가능 — 모멘텀이 진입 기준 통과했으면 1차 검증 끝남
-4. 본 토론은 "이 진입의 추가 리스크가 심각한가"만 판정 (severity 8+ = 치명적 리스크)
-5. 어중간(severity 4~7)은 매수 허용
+1. 제공된 숫자 외엔 어떤 수치도 만들지 마시오
+2. RSI=0/거래량=0은 "지표 미수신"이지 "데이터 없음"이 아님 → 차단 사유 X
+3. 모멘텀 통과 시 1차 검증 완료. 이 토론은 "치명적 리스크 유무"만 판정
+4. 5인 중 3명+ 찬성 → 매수 허용
 
 코인: {coin}
-현재 지표 (이것만 사용):
-- RSI: {rsi}
-- 거래량 점수: {vol}
-- 모멘텀: {momentum}점
-- 시장 상태: {market}
-- 공포탐욕지수: {fear_greed}
+지표 (이것만):
+- RSI: {rsi} / 거래량 점수: {vol} / 모멘텀: {momentum}점
+- 시장: {market} / 공탐: {fear_greed}
 {coin_record}
 {lesson_str}
 
-아래 3명이 순서대로 의견을 내고, 마지막에 심판이 종합 판정하세요:
+5명 각자 입장 (찬/반/사유):
+1. 🎯 김트레이드 (모멘텀 추세) — 거래량+RSI
+2. 🧮 이퀀트 (통계 알고) — 백테스트 확률
+3. 🐢 박터틀 (보수 대형추세) — 추세 확실한가
+4. ⚡ 최스캘퍼 (단타 폭발) — 5분 내 반등?
+5. 🛡 정디펜더 (리스크) — 최악 시나리오
 
-🧑‍💼 공격파 (10년차 트레이더):
-- 매수해야 하는 이유 (구체적 수치 근거 2~3줄)
+각자 판단 후 투표 집계 → 최종 verdict.
 
-🛡 보수파 (리스크 매니저):
-- 매수하면 안 되는 이유 (공격파 주장 반박 + 수치 근거 2~3줄)
-
-⚖️ 심판 (퀀트 분석가):
-- 공격파/보수파 핵심 논점 정리
-- 재반론: 보수파 약점 또는 공격파 약점 지적
-- 최종 판정
-
-반드시 아래 JSON 형식으로만 응답하세요:
-{{"bull": "공격파 의견 요약", "bear": "보수파 의견 요약", "rebuttal": "심판 재반론", "verdict": "buy|hold|skip", "confidence": 0.0~1.0, "bear_severity": 1~10, "ratio": 50~100, "stop_loss": -3~-5, "target_1": 2~5, "target_2": 5~10, "risk": "낮음|중간|높음", "summary": "한줄 판정"}}"""
+JSON (필수):
+{{"votes": {{"김트레이드":"buy|skip", "이퀀트":"buy|skip", "박터틀":"buy|skip", "최스캘퍼":"buy|skip", "정디펜더":"buy|skip"}}, "reasons": {{"김트레이드":"...", "이퀀트":"...", "박터틀":"...", "최스캘퍼":"...", "정디펜더":"..."}}, "verdict": "buy|skip", "confidence": 0.0~1.0, "bear_severity": 1~10, "ratio": 50~100, "stop_loss": -3~-5, "target_1": 2~5, "target_2": 5~10, "risk": "낮음|중간|높음", "summary": "N:M 투표, 한줄요약"}}"""
 
     def _parse_response(self, response):
         try:
@@ -571,6 +570,72 @@ class AIAgents:
             return True, improve, f'개선 예상 (+{improve:,.0f}원)'
         except Exception as e:
             return True, 0, f'검증 오류 → 적용: {e}'
+
+    def daily_socratic_review(self):
+        """v7.9: 하루 단위 거래 묶어서 소크라테스식 통합 복기 → 메타 교훈 도출
+        단일 거래 복기 + 일 단위 패턴 분석 둘 다 하는 2계층 학습"""
+        if not self.enabled:
+            return None
+        try:
+            with self.db_lock:
+                conn = sqlite3.connect(self.db_path)
+                rows = conn.execute(
+                    "SELECT coin, profit_rate, momentum, batch FROM trades "
+                    "WHERE action='sell' AND date(timestamp)=date('now') "
+                    "ORDER BY id DESC"
+                ).fetchall()
+                conn.close()
+            if len(rows) < 5:
+                return None  # 하루 최소 5건 있어야 의미
+
+            wins = sum(1 for r in rows if r[1] > 0)
+            total = len(rows)
+            wr = wins / total * 100
+            pnl_rate = sum(r[1] for r in rows)
+            top_losses = sorted([r for r in rows if r[1] < 0], key=lambda x: x[1])[:3]
+            top_wins = sorted([r for r in rows if r[1] > 0], key=lambda x: -x[1])[:3]
+
+            prompt = f"""10년차 트레이더 김트레이드로서, 오늘 하루 거래를 소크라테스식으로 복기하세요.
+
+오늘 거래: {total}건, 승률 {wr:.0f}%, 누적 수익률 {pnl_rate:+.2f}%
+최대 수익 3: {[(r[0], f'{r[1]:+.1f}%') for r in top_wins]}
+최대 손실 3: {[(r[0], f'{r[1]:+.1f}%') for r in top_losses]}
+
+질문:
+1. 오늘 승패를 가른 결정적 패턴 1개는?
+2. 다시 하면 안 되는 행동 1개는?
+3. 내일 반드시 시도할 행동 1개는?
+4. 지금 봇 파라미터 중 1개 조정해야 한다면?
+
+JSON: {{"key_pattern": "...", "never_do": "...", "must_try": "...", "param_adj": "stop_loss|take_profit|momentum_threshold|cooldown|none", "confidence": 0.0-1.0}}"""
+
+            response = self.cli.call(prompt, max_tokens=500)
+            if not response:
+                return None
+            match = re.search(r'\{[^}]*\}', response, re.DOTALL)
+            if match:
+                data = json.loads(match.group())
+                print(f"🧠 [소크라테스 복기] 패턴: {data.get('key_pattern', '')[:60]}")
+                print(f"🧠 [소크라테스 복기] 피해야 할 것: {data.get('never_do', '')[:60]}")
+                print(f"🧠 [소크라테스 복기] 시도할 것: {data.get('must_try', '')[:60]}")
+                # DB에 메타 교훈 저장
+                try:
+                    with self.db_lock:
+                        conn = sqlite3.connect(self.db_path)
+                        conn.execute(
+                            "INSERT INTO trade_reflections (coin, lesson, mistake_type, severity, actionable_rule, created_at) "
+                            "VALUES (?,?,?,?,?,?)",
+                            ('_DAILY_META', f"[패턴] {data.get('key_pattern', '')} | [피할것] {data.get('never_do', '')}",
+                             'meta', 5, data.get('must_try', ''), datetime.now().isoformat())
+                        )
+                        conn.commit()
+                        conn.close()
+                except Exception:
+                    pass
+                return data
+        except Exception as e:
+            print(f"⚠️ [소크라테스] 오류: {e}")
+        return None
 
     def get_lesson_adjustments(self):
         """교훈 DB 분석 → 매도 파라미터 자동 조정값 반환 (되먹임 루프 + 백테스트 검증)"""

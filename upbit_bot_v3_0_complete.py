@@ -3150,8 +3150,8 @@ class TradingBotV3:
     # 3. 자동 매수/매도
     # ============================================
     
-    MAX_POSITIONS = 5  # v7.4: 3→5슬롯 (데이터 축적 속도 우선, 베타)
-    MAX_POSITIONS_BOOST = 7  # v7.4: 4→7 (AI 확신 시)
+    MAX_POSITIONS = 8  # v7.9: 과감 모드 — 1000만 전액 활용
+    MAX_POSITIONS_BOOST = 10  # AI 확신 시 10개
 
     # 코인 섹터 분류 (동일 섹터 집중 방지)
     COIN_SECTORS = {
@@ -4068,11 +4068,11 @@ class TradingBotV3:
                 if getattr(self, '_strong_half_budget', False) and coin_is_strong:
                     coin_budget = coin_budget // 2
                     self._strong_half_budget = False
-                # 집중투자: 1차 40% + 2차 30% + 3차 30%, 일반: 1차 50% + 2차 50%
+                # v7.9: 과감 모드 — 1차 풀 투입 (물타기는 진짜 기회 때만 따로)
                 if is_concentrate:
-                    buy_amount = int(coin_budget * 0.4)
+                    buy_amount = int(coin_budget * 0.5)
                 else:
-                    buy_amount = int(coin_budget // 2)
+                    buy_amount = int(coin_budget * 1.0)  # 100% 투입
                 if buy_amount < 5000:
                     print(f" 💸 매수금액 부족 ({buy_amount:,}원) → 패스")
                     continue
