@@ -127,7 +127,7 @@ class ReflectionAgent:
 
     def _build_prompt(self, td):
         result_emoji = "✅ 수익" if td.get('profit_rate', 0) > 0 else "❌ 손실" if td.get('profit_rate', 0) < 0 else "➖ 무승부"
-        return f"""당신은 10년차 암호화폐 트레이더 '김트레이드'입니다. 방금 끝난 거래를 소크라테스식 자문자답으로 깊이 복기하세요.
+        return f"""5인 합의체 트레이더입니다. DEFEAT_ANALYSIS.md 기준으로 패배 분류 + 소크라테스 복기.
 
 거래 결과:
 - 코인: {td.get('coin', '?')}
@@ -137,15 +137,23 @@ class ReflectionAgent:
 - 진입 모멘텀: {td.get('momentum_at_entry', 0)}점
 - 시장 상태: {td.get('market_state', '보통')}
 
-소크라테스 5단계 자문:
-1. 내가 왜 진입했는가? (진입 근거의 실체)
-2. 실제 결과가 근거와 일치했는가? (가설 검증)
-3. 일치/불일치의 원인은 무엇인가? (운 vs 실력 분리)
-4. 같은 상황 재발 시 다르게 할 것이 있는가? (개선점)
-5. 이 거래로 앞으로 어떤 규칙을 갱신/추가해야 하는가? (학습)
+【패배 분류 기준 (필수)】
+Type A (어쩔 수 없음): 시장급변/뉴스/유동성/정상손절 → 개선 X, 기록만
+Type B (고칠 수 있음): 분석실패/매도타이밍/과진입/반복실수/물타기오판/쿨다운무시 → 개선 필수
 
-반드시 아래 JSON 형식으로만 응답 (필드 전부 필수):
-{{"lesson": "1~2문장 핵심 교훈", "mistake_type": "timing|overchase|early_exit|ignore_trend|none", "severity": 1~5, "actionable_rule": "구체적 행동 규칙", "luck_vs_skill": "luck|skill|mixed", "should_repeat": true|false}}"""
+【5인 분류 관점】
+- 김트레이드: 거래량+RSI 충족? (미충족=과진입=Type B)
+- 이퀀트: 같은 조건 과거 승률 55%+? (이하=전략문제=Type B)
+- 박터틀: BTC 추세 거슬렀나? (역행=Type B)
+- 최스캘퍼: 고점 대비 30%+ 내려서 팔았나? (Type B)
+- 정디펜더: 단일 손실 -2% 초과? (Type B)
+
+【소크라테스 5단계】
+1. 왜 진입했는가? 2. 결과가 근거와 일치했나? 3. 원인은? (운/실력)
+4. 다음에 다르게 할 것은? 5. 어떤 규칙을 갱신할 것인가?
+
+JSON (필수):
+{{"lesson": "1~2문장 핵심 교훈", "mistake_type": "timing|overchase|early_exit|ignore_trend|late_stoploss|profit_giveback|none", "severity": 1~5, "actionable_rule": "구체적 행동 규칙", "luck_vs_skill": "luck|skill|mixed", "should_repeat": true|false, "defeat_type": "A|B|win", "type_b_pattern": "분석실패|매도타이밍|과진입|반복실수|물타기오판|쿨다운무시|none"}}"""
 
     def _parse_response(self, response):
         try:
@@ -562,10 +570,44 @@ class AIAgents:
             return {'should_sell': False, 'summary': '', 'verdict': 'hold'}
 
     def _validate_adjustments_backtest(self, adjustments):
-        """v7.2: 제안된 조정값을 과거 거래에 시뮬 → P&L 개선되는 경우만 통과
+        """v8.2 (DEFEAT_ANALYSIS 기반): 5가지 절대 금지 원칙 + 백테스트 검증
         반환: (통과여부, 개선액, 사유)"""
         if not adjustments:
             return True, 0, '조정 없음'
+
+        # 절대 금지 5: 패치 후 48시간 안에 또 패치하지 않는다
+        try:
+            with self.db_lock:
+                conn = sqlite3.connect(self.db_path)
+                last_rule = conn.execute(
+                    "SELECT created_at FROM auto_tune_rules WHERE active=1 "
+                    "ORDER BY created_at DESC LIMIT 1"
+                ).fetchone()
+                conn.close()
+            if last_rule and last_rule[0]:
+                last_ts = datetime.fromisoformat(last_rule[0])
+                hours_since = (datetime.now() - last_ts).total_seconds() / 3600
+                if hours_since < 48:
+                    return False, 0, f'48시간 룰: 마지막 패치 {hours_since:.1f}h 전 → 보류'
+        except Exception:
+            pass
+
+        # 절대 금지 3: 하루 2개 이상 변수 동시 변경 금지
+        non_reason_keys = [k for k in adjustments.keys() if not k.startswith('reason_')]
+        if len(non_reason_keys) > 1:
+            # 가장 영향 큰 1개만 남기고 나머지 제거
+            priority = ['min_profit_target', 'momentum_boost', 'min_hold_minutes',
+                        'trailing_drop_boost', 'cooldown_boost']
+            kept = None
+            for p in priority:
+                if p in adjustments:
+                    kept = p
+                    break
+            if kept:
+                new_adj = {k: v for k, v in adjustments.items() if k == kept or k.startswith('reason_')}
+                adjustments.clear()
+                adjustments.update(new_adj)
+                print(f"🛡 [DEFEAT 가드] 동시 변경 {len(non_reason_keys)}개 → 1개({kept})만 유지")
 
         try:
             with self.db_lock:
@@ -589,7 +631,14 @@ class AIAgents:
             # 실제 P&L
             actual_pnl = sum(v['sell'][5] for v in pairs.values()
                              if 'sell' in v and v['sell'][5] is not None)
-            if len([v for v in pairs.values() if 'sell' in v]) < 10:
+            sells_count = len([v for v in pairs.values() if 'sell' in v])
+            # DEFEAT_ANALYSIS 절대 금지 2: 30회 미만 샘플로 전략 삭제 X
+            # 단, 진입 기준 완화/경미한 조정은 30회 미만도 OK
+            destructive_keys = ['surge_pause', 'batch2_pause', 'block_coin']
+            is_destructive = any(k in adjustments for k in destructive_keys)
+            if is_destructive and sells_count < 30:
+                return False, 0, f'전략 삭제는 30회+ 필요 (현재 {sells_count}건) → 보류'
+            if sells_count < 10:
                 return True, 0, '데이터 부족(10건 미만) → 일단 적용'
 
             # 시뮬: min_hold_minutes 증가 → 짧게 끊긴 수익 거래의 상당수가 -보유시간 체크로 연장되어 차이 미미

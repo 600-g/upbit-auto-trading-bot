@@ -1,6 +1,8 @@
 # CLAUDE.md — 매매봇 (upbit-auto-trading-bot)
 > 두근컴퍼니 PM | 담당: 업비트 자동매매
-> **⚠️ 필수: 작업 시작 전 [PERSONA.md](./PERSONA.md) 반드시 로드** — 김트레이드 10년차 인격
+> **⚠️ 필수 로드 (작업 시작 전):**
+> 1. [PERSONA.md](./PERSONA.md) — 5인 합의체 인격
+> 2. [directives/DEFEAT_ANALYSIS.md](./directives/DEFEAT_ANALYSIS.md) — 패배 분류 + 자가개선 5가지 절대 금지
 
 ---
 
