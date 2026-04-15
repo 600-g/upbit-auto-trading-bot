@@ -3768,6 +3768,16 @@ class TradingBotV3:
             min_score = max(10, min_score + _ma['entry_adj'])
             print(f"🎯 [시장적응] 진입 기준 {_ma['entry_adj']:+d}점 → {min_score}점")
 
+        # v8.1: 자금 활용률 부족 시 진입 기준 자동 완화 (놀고 있는 돈 줄이기)
+        _cur_pos = len(self.positions)
+        _util = _cur_pos / self.MAX_POSITIONS if self.MAX_POSITIONS else 0
+        if _util < 0.3:  # 30% 미만 활용
+            min_score = max(8, min_score - 4)
+            print(f"💰 [자금부족] 활용률 {_util*100:.0f}% → 진입 기준 -4점 = {min_score}점")
+        elif _util < 0.5:
+            min_score = max(10, min_score - 2)
+            print(f"💰 [자금부족] 활용률 {_util*100:.0f}% → 진입 기준 -2점 = {min_score}점")
+
         # 코인 선택
         selected = self.select_coins()
         print(f"🎯 선택된 코인: {selected}\n")
@@ -3796,24 +3806,28 @@ class TradingBotV3:
             if remaining_slots <= 0:
                 break
 
-            # v7.3: 동적 쿨다운 — R:R 좋으면 거래량 증대, 나쁘면 억제
-            _ai_cooldown_boost = getattr(self, '_ai_lesson_adj', {}).get('cooldown_boost', 0)
-            # 최근 성과 기반 동적 조정 (오늘 P&L > 0 → 쿨다운 -50%, P&L < -3만 → +100%)
-            _dynamic_cd = 0
-            try:
-                today_pnl = sum(t.get('profit', 0) for t in self.trades[-30:] if t.get('profit'))
-                if today_pnl > 0:
-                    _dynamic_cd = -180  # 쿨다운 -3분 (거래량 확대)
-                elif today_pnl < -30000:
-                    _dynamic_cd = 300   # 쿨다운 +5분 (방어)
-            except Exception:
+            # v8.1: 자금 활용률 기반 쿨다운 — 50% 미만이면 쿨다운 면제 (자금 노는 거 방지)
+            _util_ratio = current_positions / self.MAX_POSITIONS  # 0.0 ~ 1.0
+            if _util_ratio < 0.5:
+                # 포지션 절반 이하 = 자금 놀고 있음 → 쿨다운 X, 즉시 다음 매수
                 pass
-            _entry_cooldown = max(60, 300 + _ai_cooldown_boost + _dynamic_cd)  # v7.4: 최소 1분, 기본 5분
-            _last_entry = getattr(self, '_last_new_entry_time', 0)
-            if time.time() - _last_entry < _entry_cooldown:
-                _remaining_cool = int((_entry_cooldown - (time.time() - _last_entry)) / 60)
-                print(f"⏳ 신규 진입 쿨타임 {_entry_cooldown//60}분 미경과 (잔여 {_remaining_cool}분) → 패스")
-                break
+            else:
+                _ai_cooldown_boost = getattr(self, '_ai_lesson_adj', {}).get('cooldown_boost', 0)
+                _dynamic_cd = 0
+                try:
+                    today_pnl = sum(t.get('profit', 0) for t in self.trades[-30:] if t.get('profit'))
+                    if today_pnl > 0:
+                        _dynamic_cd = -180
+                    elif today_pnl < -30000:
+                        _dynamic_cd = 300
+                except Exception:
+                    pass
+                _entry_cooldown = max(60, 300 + _ai_cooldown_boost + _dynamic_cd)
+                _last_entry = getattr(self, '_last_new_entry_time', 0)
+                if time.time() - _last_entry < _entry_cooldown:
+                    _remaining_cool = int((_entry_cooldown - (time.time() - _last_entry)) / 60)
+                    print(f"⏳ 신규 진입 쿨타임 {_entry_cooldown//60}분 미경과 (잔여 {_remaining_cool}분, 활용률 {_util_ratio*100:.0f}%) → 패스")
+                    break
 
             # 이미 보유 중인 코인 스킵
             if coin in self.positions:
