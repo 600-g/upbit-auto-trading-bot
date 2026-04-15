@@ -3506,9 +3506,52 @@ class TradingBotV3:
     # 4. 거래 사이클
     # ============================================
     
+    def _check_zombie_positions(self):
+        """v8.3: 좀비 포지션 감지 — DB의 buy 중 active_positions에 없는 것
+        잔고-자산 불일치 원인. 발견 시 자동 청산."""
+        try:
+            with self._db_lock:
+                cursor = self.db.execute("""
+                    SELECT coin, batch FROM trades
+                    GROUP BY coin, batch
+                    HAVING SUM(CASE WHEN action='buy' THEN 1 ELSE 0 END)
+                         > SUM(CASE WHEN action='sell' THEN 1 ELSE 0 END)
+                """)
+                db_open = set((c, b) for c, b in cursor.fetchall())
+            mem_open = set((c, b) for c in self.positions for b in self.positions[c].keys())
+            zombies = db_open - mem_open
+            if zombies:
+                print(f"🧟 [좀비 감지] {len(zombies)}건 — {list(zombies)[:5]}")
+                for coin, batch in zombies:
+                    try:
+                        with self._db_lock:
+                            r = self.db.execute(
+                                "SELECT amount, price, quantity FROM trades WHERE coin=? AND batch=? AND action='buy' ORDER BY id DESC LIMIT 1",
+                                (coin, batch)
+                            ).fetchone()
+                        if not r:
+                            continue
+                        buy_amount, buy_price, qty = r
+                        cur_price = self.get_price(coin)
+                        if not cur_price:
+                            continue
+                        sell_amount = qty * cur_price
+                        profit = sell_amount - buy_amount
+                        pr = (cur_price - buy_price) / buy_price * 100
+                        self._db_log_trade(coin, "sell", cur_price, qty, sell_amount,
+                                           profit=profit, profit_rate=pr, momentum=0, batch=batch)
+                        print(f"  🧟→💀 {coin}/{batch} 좀비청산 {pr:+.2f}% ({profit:+,.0f}원)")
+                    except Exception as ze:
+                        print(f"  ⚠️ 좀비 청산 실패 {coin}/{batch}: {ze}")
+        except Exception as e:
+            print(f"⚠️ 좀비 체크 오류: {e}")
+
     def run_trading_cycle(self):
         """거래 사이클"""
         print(f"\n📊 [{datetime.now()}] === 거래 사이클 시작 ===\n")
+
+        # v8.3: 좀비 포지션 자동 감지/청산 (잔고 불일치 방지)
+        self._check_zombie_positions()
 
         # v4.4: 사이클 시작 시 AutoTune 규칙 캐시 갱신
         self._autotune_apply_rules()
