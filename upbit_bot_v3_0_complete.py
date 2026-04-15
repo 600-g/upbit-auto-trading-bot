@@ -3507,31 +3507,44 @@ class TradingBotV3:
     # ============================================
     
     def _check_zombie_positions(self):
-        """v8.3: 좀비 포지션 감지 — DB의 buy 중 active_positions에 없는 것
-        잔고-자산 불일치 원인. 발견 시 자동 청산."""
+        """v8.3.1: 좀비 포지션 감지 — buy COUNT > sell COUNT 페어만 정확히 청산
+        중복 청산 방지를 위해 buy/sell 수 차이 1건당 정확히 1번만 sell"""
         try:
             with self._db_lock:
                 cursor = self.db.execute("""
-                    SELECT coin, batch FROM trades
+                    SELECT coin, batch,
+                      SUM(CASE WHEN action='buy' THEN 1 ELSE 0 END) buys,
+                      SUM(CASE WHEN action='sell' THEN 1 ELSE 0 END) sells
+                    FROM trades
                     GROUP BY coin, batch
-                    HAVING SUM(CASE WHEN action='buy' THEN 1 ELSE 0 END)
-                         > SUM(CASE WHEN action='sell' THEN 1 ELSE 0 END)
+                    HAVING buys > sells
                 """)
-                db_open = set((c, b) for c, b in cursor.fetchall())
+                pending = cursor.fetchall()
             mem_open = set((c, b) for c in self.positions for b in self.positions[c].keys())
-            zombies = db_open - mem_open
+            zombies = [(c, b) for c, b, _, _ in pending if (c, b) not in mem_open]
+
             if zombies:
-                print(f"🧟 [좀비 감지] {len(zombies)}건 — {list(zombies)[:5]}")
+                print(f"🧟 [좀비 감지] {len(zombies)}건 — {zombies[:5]}")
                 for coin, batch in zombies:
                     try:
+                        # 가장 최근 buy 1건 (이미 sell 안 된)
                         with self._db_lock:
-                            r = self.db.execute(
-                                "SELECT amount, price, quantity FROM trades WHERE coin=? AND batch=? AND action='buy' ORDER BY id DESC LIMIT 1",
-                                (coin, batch)
-                            ).fetchone()
+                            r = self.db.execute("""
+                                SELECT id, amount, price, quantity FROM trades
+                                WHERE coin=? AND batch=? AND action='buy'
+                                  AND id NOT IN (
+                                    SELECT t1.id FROM trades t1
+                                    WHERE t1.coin=? AND t1.batch=? AND t1.action='buy'
+                                      AND (SELECT COUNT(*) FROM trades t2
+                                           WHERE t2.coin=t1.coin AND t2.batch=t1.batch
+                                           AND t2.action='sell' AND t2.id > t1.id) > 0
+                                  )
+                                ORDER BY id ASC LIMIT 1
+                            """, (coin, batch, coin, batch)).fetchone()
                         if not r:
+                            print(f"  ⚠️ {coin}/{batch} 좀비지만 미매도 buy 없음 → 스킵")
                             continue
-                        buy_amount, buy_price, qty = r
+                        buy_id, buy_amount, buy_price, qty = r
                         cur_price = self.get_price(coin)
                         if not cur_price:
                             continue
@@ -3540,7 +3553,7 @@ class TradingBotV3:
                         pr = (cur_price - buy_price) / buy_price * 100
                         self._db_log_trade(coin, "sell", cur_price, qty, sell_amount,
                                            profit=profit, profit_rate=pr, momentum=0, batch=batch)
-                        print(f"  🧟→💀 {coin}/{batch} 좀비청산 {pr:+.2f}% ({profit:+,.0f}원)")
+                        print(f"  🧟→💀 {coin}/{batch} 좀비청산 (buyId{buy_id}) {pr:+.2f}% ({profit:+,.0f}원)")
                     except Exception as ze:
                         print(f"  ⚠️ 좀비 청산 실패 {coin}/{batch}: {ze}")
         except Exception as e:
