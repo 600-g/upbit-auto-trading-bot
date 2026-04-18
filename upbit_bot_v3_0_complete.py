@@ -4028,12 +4028,14 @@ class TradingBotV3:
                 print("💸 가용 금액 부족 → 매수 중단")
                 break
 
-            # v6.4: 진입 시 거래량 추세 확인 (횡보 코인 진입 방지)
+            # v8.1 (4/18 D-1 패치): fading 허용, dead만 차단 — 시드 활용률 상향
             try:
                 _entry_trend, _entry_ratio = self.analyze_volume_trend(coin)
-                if _entry_trend in ("dead", "fading"):
-                    print(f"📉 {coin} 거래량 {_entry_trend}(비율{_entry_ratio:.2f}) → 진입 스킵")
+                if _entry_trend == "dead":
+                    print(f"📉 {coin} 거래량 dead(비율{_entry_ratio:.2f}) → 진입 스킵")
                     continue
+                elif _entry_trend == "fading":
+                    print(f"⚠️ {coin} 거래량 fading(비율{_entry_ratio:.2f}) → 허용 (v8.1)")
             except:
                 pass
 
